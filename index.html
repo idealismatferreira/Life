@@ -442,16 +442,22 @@ const progressoPassadas = etapas => {
   };
 };
 const DEFAULT_META = 3;
-// Ordena categorias: as fixas primeiro (na ordem de CATEGORIAS), órfãs depois
-function ordenarCategorias(nomes) {
+// Ordena categorias: usa ordem customizada (se houver), depois fixas, depois órfãs
+function ordenarCategorias(nomes, customOrder) {
+  const custom = customOrder || [];
   const ordem = CATEGORIAS.map(c => c.nome);
+  const rank = nome => {
+    const ic = custom.indexOf(nome);
+    if (ic !== -1) return ic; // categorias na ordem customizada vêm primeiro
+    const ix = ordem.indexOf(nome);
+    if (ix !== -1) return custom.length + ix; // depois as fixas na ordem padrão
+    return custom.length + ordem.length + 1; // órfãs por último
+  };
   return [...nomes].sort((a, b) => {
-    const ia = ordem.indexOf(a),
-      ib = ordem.indexOf(b);
-    if (ia === -1 && ib === -1) return a.localeCompare(b);
-    if (ia === -1) return 1;
-    if (ib === -1) return -1;
-    return ia - ib;
+    const ra = rank(a),
+      rb = rank(b);
+    if (ra === rb) return a.localeCompare(b);
+    return ra - rb;
   });
 }
 
@@ -552,6 +558,7 @@ async function apiCall(payload) {
 /* ============ APP ============ */
 function App() {
   const [projects, setProjects] = useState([]);
+  const [ordemCat, setOrdemCat] = useState([]); // ordem customizada das categorias
   const [log, setLog] = useState([]); // eventos de avanço: {data, projeto, categoria, etapa}
   const [loaded, setLoaded] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // status do PULL manual: idle|saving|ok|err|noapi
@@ -571,6 +578,7 @@ function App() {
         const data = JSON.parse(raw);
         setProjects(resetRotinas(data.projects || []));
         setLog(data.log || []);
+        setOrdemCat(data.ordemCat || []);
       } catch (e) {}
     }
     setLoaded(true);
@@ -582,6 +590,7 @@ function App() {
     localStorage.setItem(LS_KEY, JSON.stringify({
       projects,
       log,
+      ordemCat,
       savedAt: Date.now()
     }));
     dirty.current = true;
@@ -688,6 +697,19 @@ function App() {
       arr[j] = tmp;
       return arr;
     });
+  }
+
+  // Move uma categoria inteira para cima/baixo (dir = -1 sobe, +1 desce)
+  function moverCategoria(nomeCat, dir) {
+    const catsAtuais = ordenarCategorias(Array.from(new Set(projetos.map(p => p.categoria))), ordemCat);
+    const i = catsAtuais.indexOf(nomeCat);
+    const j = i + dir;
+    if (i === -1 || j < 0 || j >= catsAtuais.length) return;
+    const nova = [...catsAtuais];
+    const tmp = nova[i];
+    nova[i] = nova[j];
+    nova[j] = tmp;
+    setOrdemCat(nova);
   }
 
   // Volta uma passada na etapa atual (corrige check errado)
@@ -899,27 +921,33 @@ function App() {
       ref: "new",
       tipo: "Projeto"
     })
-  }), ordenarCategorias(Object.keys(porCategoria)).map(nome => {
-    const cat = CATEGORIAS.find(c => c.nome === nome) || {
-      nome,
-      emoji: porCategoria[nome][0] && porCategoria[nome][0].emoji || "📌"
-    };
-    return /*#__PURE__*/React.createElement(CategoriaBloco, {
-      key: nome,
-      cat: cat,
-      projetos: porCategoria[nome],
-      onAvancar: avancar,
-      onVoltar: voltar,
-      onToggleEtapa: toggleEtapa,
-      onFav: toggleFav,
-      onEdit: p => setEditing({
-        ref: p,
-        ...p
-      }),
-      onRemove: removeProject,
-      onMover: moverProjeto
+  }), (() => {
+    const cats = ordenarCategorias(Object.keys(porCategoria), ordemCat);
+    return cats.map((nome, ci) => {
+      const cat = CATEGORIAS.find(c => c.nome === nome) || {
+        nome,
+        emoji: porCategoria[nome][0] && porCategoria[nome][0].emoji || "📌"
+      };
+      return /*#__PURE__*/React.createElement(CategoriaBloco, {
+        key: nome,
+        cat: cat,
+        projetos: porCategoria[nome],
+        onAvancar: avancar,
+        onVoltar: voltar,
+        onToggleEtapa: toggleEtapa,
+        onFav: toggleFav,
+        onEdit: p => setEditing({
+          ref: p,
+          ...p
+        }),
+        onRemove: removeProject,
+        onMover: moverProjeto,
+        onMoverCat: moverCategoria,
+        catFirst: ci === 0,
+        catLast: ci === cats.length - 1
+      });
     });
-  }), /*#__PURE__*/React.createElement(RotinasFooter, {
+  })(), /*#__PURE__*/React.createElement(RotinasFooter, {
     rotinas: rotinas,
     onToggle: toggleRotina,
     onAdd: () => setEditing({
@@ -1218,7 +1246,10 @@ function CategoriaBloco({
   onFav,
   onEdit,
   onRemove,
-  onMover
+  onMover,
+  onMoverCat,
+  catFirst,
+  catLast
 }) {
   const [open, setOpen] = useState(true);
   const agg = projetos.reduce((a, p) => {
@@ -1238,18 +1269,20 @@ function CategoriaBloco({
     }
   }, /*#__PURE__*/React.createElement("div", {
     className: "row",
-    onClick: () => setOpen(!open),
     style: {
       justifyContent: "space-between",
-      cursor: "pointer",
       padding: "8px 2px",
       borderBottom: "1px solid var(--border)"
     }
   }, /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
-      gap: 7
-    }
+      gap: 7,
+      cursor: "pointer",
+      flex: 1,
+      minWidth: 0
+    },
+    onClick: () => setOpen(!open)
   }, /*#__PURE__*/React.createElement("span", {
     style: {
       color: "var(--text-3)",
@@ -1262,12 +1295,42 @@ function CategoriaBloco({
       fontSize: 14,
       fontWeight: 600
     }
-  }, cat.emoji, " ", cat.nome)), /*#__PURE__*/React.createElement("span", {
+  }, cat.emoji, " ", cat.nome)), /*#__PURE__*/React.createElement("div", {
+    className: "row",
+    style: {
+      gap: 8,
+      flex: "none",
+      alignItems: "center"
+    }
+  }, onMoverCat && /*#__PURE__*/React.createElement("span", {
+    className: "row",
+    style: {
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    onClick: () => !catFirst && onMoverCat(cat.nome, -1),
+    title: "Subir categoria",
+    style: {
+      cursor: catFirst ? "default" : "pointer",
+      color: catFirst ? "var(--border-strong)" : "var(--text-2)",
+      fontSize: 15,
+      padding: "2px 3px"
+    }
+  }, "▲"), /*#__PURE__*/React.createElement("span", {
+    onClick: () => !catLast && onMoverCat(cat.nome, 1),
+    title: "Descer categoria",
+    style: {
+      cursor: catLast ? "default" : "pointer",
+      color: catLast ? "var(--border-strong)" : "var(--text-2)",
+      fontSize: 15,
+      padding: "2px 3px"
+    }
+  }, "▼")), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 11,
       color: "var(--text-3)"
     }
-  }, doneEtapas, "/", totalEtapas)), open && projetos.map((p, i) => /*#__PURE__*/React.createElement(ProjectCard, {
+  }, doneEtapas, "/", totalEtapas))), open && projetos.map((p, i) => /*#__PURE__*/React.createElement(ProjectCard, {
     key: p.projId || p.projeto,
     p: p,
     onAvancar: onAvancar,
@@ -1317,6 +1380,15 @@ function ProjectCard({
       minWidth: 0
     }
   }, /*#__PURE__*/React.createElement("span", {
+    onClick: () => onFav(p),
+    title: p.favorito ? "Remover do Foco" : "Adicionar ao Foco",
+    style: {
+      cursor: "pointer",
+      color: p.favorito ? "var(--warn)" : "var(--text-3)",
+      fontSize: 18,
+      flex: "none"
+    }
+  }, "★"), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 14,
       fontWeight: 600
@@ -1324,8 +1396,9 @@ function ProjectCard({
   }, p.emoji, " ", p.projeto)), /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
-      gap: 8,
-      flex: "none"
+      gap: 10,
+      flex: "none",
+      alignItems: "center"
     }
   }, st && /*#__PURE__*/React.createElement("span", {
     className: "chip",
@@ -1336,39 +1409,34 @@ function ProjectCard({
   }, st.txt), onMover && /*#__PURE__*/React.createElement("span", {
     className: "row",
     style: {
-      gap: 2
+      gap: 6
     }
   }, /*#__PURE__*/React.createElement("span", {
     onClick: () => !isFirst && onMover(p, -1),
     title: "Mover para cima",
     style: {
       cursor: isFirst ? "default" : "pointer",
-      color: isFirst ? "var(--border-strong)" : "var(--text-3)",
-      fontSize: 13,
-      padding: "0 2px"
+      color: isFirst ? "var(--border-strong)" : "var(--text-2)",
+      fontSize: 16,
+      padding: "2px 3px"
     }
   }, "▲"), /*#__PURE__*/React.createElement("span", {
     onClick: () => !isLast && onMover(p, 1),
     title: "Mover para baixo",
     style: {
       cursor: isLast ? "default" : "pointer",
-      color: isLast ? "var(--border-strong)" : "var(--text-3)",
-      fontSize: 13,
-      padding: "0 2px"
+      color: isLast ? "var(--border-strong)" : "var(--text-2)",
+      fontSize: 16,
+      padding: "2px 3px"
     }
   }, "▼")), /*#__PURE__*/React.createElement("span", {
-    onClick: () => onFav(p),
-    style: {
-      cursor: "pointer",
-      color: p.favorito ? "var(--warn)" : "var(--text-3)",
-      fontSize: 16
-    }
-  }, "★"), /*#__PURE__*/React.createElement("span", {
     onClick: () => onEdit(p),
+    title: "Editar",
     style: {
       cursor: "pointer",
-      color: "var(--text-3)",
-      fontSize: 14
+      color: "var(--text-2)",
+      fontSize: 17,
+      padding: "2px 3px"
     }
   }, "✎"))), /*#__PURE__*/React.createElement("div", null, p.etapas.map((e, i) => {
     const isNext = i === nextIdx;
