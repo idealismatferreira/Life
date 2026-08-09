@@ -463,6 +463,27 @@ function ordenarCategorias(nomes, customOrder) {
 
 // Estrutura em memória: lista de projetos, cada um com etapas.
 // Persistência: no Sheets é 1 linha por etapa; aqui agrupamos.
+/* Escolas do jogo — atribuídas por PROJETO, não pela categoria */
+const ESCOLAS_JOGO = [
+  { id:"",           nome:"— nenhuma —",  icone:"·",  cor:"#7d8f7f" },
+  { id:"harmonica",  nome:"Harmônica",    icone:"🎻", cor:"#c9a7ff" },
+  { id:"arcana",     nome:"Arcana",       icone:"📚", cor:"#8be9ff" },
+  { id:"marcial",    nome:"Marcial",      icone:"💪", cor:"#ff9c6b" },
+  { id:"vital",      nome:"Vital",        icone:"🌿", cor:"#7fd858" },
+  { id:"domestica",  nome:"Doméstica",    icone:"🏠", cor:"#f0a868" },
+  { id:"tatica",     nome:"Tática",       icone:"💼", cor:"#ffcf6b" },
+];
+const escolaDe = (id) => ESCOLAS_JOGO.find(e => e.id === (id||"")) || ESCOLAS_JOGO[0];
+
+/* semana ISO atual — usada para reiniciar etapas semanais */
+function chaveSemana(d) {
+  const dt = d ? new Date(d) : new Date();
+  const dia = (dt.getDay() + 6) % 7;              // 0 = segunda
+  dt.setHours(0,0,0,0);
+  dt.setDate(dt.getDate() - dia);                 // volta para a segunda
+  return dt.toISOString().slice(0,10);
+}
+
 function rowsToProjects(rows) {
   const map = {};
   rows.forEach(r => {
@@ -478,10 +499,12 @@ function rowsToProjects(rows) {
         rotinaFreq: r.rotinaFreq || "Diaria",
         favorito: !!r.favorito,
         ultimoAvanco: r.ultimoAvanco || "",
+        escola: r.escola || "",
         etapas: []
       };
     }
     map[key].favorito = map[key].favorito || !!r.favorito;
+    if (r.escola && !map[key].escola) map[key].escola = r.escola;
     if (r.ultimoAvanco > map[key].ultimoAvanco) map[key].ultimoAvanco = r.ultimoAvanco;
     if (r.etapa && String(r.etapa).trim() !== "") {
       map[key].etapas.push({
@@ -490,7 +513,8 @@ function rowsToProjects(rows) {
         ordem: r.ordem || 0,
         meta: r.meta || DEFAULT_META,
         passadas: r.passadas || 0,
-        concluida: !!r.concluida
+        concluida: !!r.concluida,
+        semanal: !!r.semanal
       });
     }
   });
@@ -517,6 +541,8 @@ function projectsToRows(projects) {
         meta: 3,
         passadas: 0,
         concluida: false,
+        escola: p.escola || "",
+        semanal: false,
         favorito: p.favorito,
         ultimoAvanco: p.ultimoAvanco
       });
@@ -536,6 +562,8 @@ function projectsToRows(projects) {
         meta: e.meta || DEFAULT_META,
         passadas: e.passadas || 0,
         concluida: e.concluida,
+        escola: p.escola || "",
+        semanal: !!e.semanal,
         favorito: p.favorito,
         ultimoAvanco: p.ultimoAvanco
       });
@@ -558,7 +586,8 @@ async function apiCall(payload) {
 /* ============ APP ============ */
 function App() {
   const [projects, setProjects] = useState([]);
-  const [ordemCat, setOrdemCat] = useState([]); // ordem customizada das categorias
+  const [ordemCat, setOrdemCat] = useState([]);
+  const [semanaAtual, setSemanaAtual] = useState(chaveSemana()); // ordem customizada das categorias
   const [log, setLog] = useState([]); // eventos de avanço: {data, projeto, categoria, etapa}
   const [loaded, setLoaded] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // status do PULL manual: idle|saving|ok|err|noapi
@@ -576,7 +605,9 @@ function App() {
     if (raw) {
       try {
         const data = JSON.parse(raw);
-        setProjects(resetRotinas(data.projects || []));
+        const rs = resetSemanais(resetRotinas(data.projects || []), data.semana);
+        setProjects(rs.projects);
+        setSemanaAtual(rs.semana);
         setLog(data.log || []);
         setOrdemCat(data.ordemCat || []);
       } catch (e) {}
@@ -629,7 +660,22 @@ function App() {
   }, [projects, log, loaded]);
 
   // Reseta rotinas cujo último check não é de hoje/desta semana
-  function resetRotinas(list) {
+  /* Toda segunda-feira 00h as etapas marcadas como semanais voltam ao zero.
+   O histórico NÃO se perde: os avanços ficam registrados no Log. */
+function resetSemanais(projects, semanaSalva) {
+  const agora = chaveSemana();
+  if (semanaSalva === agora) return { projects, semana: agora, mudou: false };
+  let mudou = false;
+  const novos = projects.map(p => {
+    if (!p.etapas || !p.etapas.some(e => e.semanal)) return p;
+    mudou = true;
+    return { ...p, etapas: p.etapas.map(e =>
+      e.semanal ? { ...e, passadas: 0, concluida: false } : e) };
+  });
+  return { projects: novos, semana: agora, mudou };
+}
+
+function resetRotinas(list) {
     return list.map(p => {
       if (p.tipo !== "Rotina") return p;
       const stale = p.rotinaFreq === "Semanal" ? isoWeek(p.ultimoAvanco) !== isoWeek(todayISO()) : p.ultimoAvanco !== todayISO();
@@ -820,6 +866,26 @@ function App() {
     });
   }
   function toggleRotina(target) {
+    const jaFeita = target.etapas[0] && target.etapas[0].concluida;
+    // marcar a rotina do dia É esforço real: registra no Log (vale XP no jogo)
+    if (!jaFeita) {
+      setLog(prev => [...prev, {
+        data: todayISO(),
+        categoria: target.categoria,
+        projeto: target.projeto,
+        etapa: target.projeto,
+      }]);
+    } else {
+      // desmarcou: remove o evento de hoje dessa rotina
+      setLog(prev => {
+        const hoje = todayISO();
+        const idx = [...prev].reverse().findIndex(ev =>
+          ev.data === hoje && ev.projeto === target.projeto);
+        if (idx === -1) return prev;
+        const real = prev.length - 1 - idx;
+        return prev.filter((_, j) => j !== real);
+      });
+    }
     setProjects(prev => prev.map(p => {
       if (p !== target) return p;
       const done = p.etapas[0] && p.etapas[0].concluida;
@@ -861,7 +927,9 @@ function App() {
         action: "getLog"
       });
       if (r.ok) {
-        setProjects(resetRotinas(rowsToProjects(r.rows)));
+        const rs2 = resetSemanais(resetRotinas(rowsToProjects(r.rows)), semanaAtual);
+        setProjects(rs2.projects);
+        setSemanaAtual(rs2.semana);
         if (rl.ok) setLog(rl.log || []);
         firstSave.current = true; // não re-empurra logo após puxar
         setPullReminder(false); // já puxou, pode mexer
@@ -884,7 +952,10 @@ function App() {
     view: view,
     setView: setView,
     pullReminder: pullReminder
-  }), view === "progresso" ? /*#__PURE__*/React.createElement(ProgressoView, {
+  }), view === "calendario" ? /*#__PURE__*/React.createElement(CalendarioView, {
+    projetos: projetos,
+    log: log
+  }) : view === "progresso" ? /*#__PURE__*/React.createElement(ProgressoView, {
     projetos: projetos,
     log: log
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, favoritos.length > 0 && /*#__PURE__*/React.createElement(FocusBand, {
@@ -1101,7 +1172,7 @@ function Header({
       gap: 6,
       marginTop: 12
     }
-  }, tab("home", "🎯 Foco"), tab("progresso", "📊 Progresso")));
+  }, tab("home", "🎯 Foco"), tab("progresso", "📊 Progresso"), tab("calendario", "🗓️ Calendário")));
 }
 function FocusBand({
   favoritos
@@ -1722,6 +1793,117 @@ function LineChart({
     }
   }, "registre passadas pra ver a linha crescer"));
 }
+/* ==========================================================
+   CALENDÁRIO — o registro transparente do que foi feito.
+   Lê o Log (que é a mesma fonte que o jogo usa para dar XP).
+   ========================================================== */
+function CalendarioView({ projetos, log }) {
+  const [mes, setMes] = useState(() => { const d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; });
+  const [diaSel, setDiaSel] = useState(new Date().toISOString().slice(0,10));
+
+  // agrupa os eventos do Log por dia
+  const porDia = useMemo(() => {
+    const m = {};
+    (log || []).forEach(ev => {
+      const d = String(ev.data || "").slice(0,10);
+      if (!d) return;
+      (m[d] = m[d] || []).push(ev);
+    });
+    return m;
+  }, [log]);
+
+  // mapa etapa -> é semanal?
+  const semanais = useMemo(() => {
+    const m = {};
+    (projetos || []).forEach(p => (p.etapas||[]).forEach(e => {
+      if (e.semanal) m[p.projeto + "|" + e.texto] = true;
+    }));
+    return m;
+  }, [projetos]);
+
+  const ano = mes.getFullYear(), mesNum = mes.getMonth();
+  const primeiro = new Date(ano, mesNum, 1);
+  const offset = (primeiro.getDay() + 6) % 7;          // segunda = 0
+  const diasNoMes = new Date(ano, mesNum + 1, 0).getDate();
+  const hoje = new Date().toISOString().slice(0,10);
+  const nomeMes = mes.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+
+  const celulas = [];
+  for (let i = 0; i < offset; i++) celulas.push(null);
+  for (let d = 1; d <= diasNoMes; d++)
+    celulas.push(new Date(ano, mesNum, d).toISOString().slice(0,10));
+
+  const eventosDoDia = porDia[diaSel] || [];
+  const totalMes = celulas.filter(Boolean).reduce((a,d) => a + (porDia[d]||[]).length, 0);
+  const diasAtivos = celulas.filter(d => d && (porDia[d]||[]).length).length;
+
+  const mudarMes = (n) => { const d = new Date(mes); d.setMonth(d.getMonth() + n); setMes(d); };
+
+  return /*#__PURE__*/React.createElement("div", { className: "fade" },
+    // cabeçalho do mês
+    /*#__PURE__*/React.createElement("div", { className: "row", style: { justifyContent:"space-between", marginBottom:12 } },
+      /*#__PURE__*/React.createElement("span", { onClick: () => mudarMes(-1),
+        style: { cursor:"pointer", color:"var(--text-2)", fontSize:18, padding:"2px 10px" } }, "\u2039"),
+      /*#__PURE__*/React.createElement("span", { style: { fontSize:15, fontWeight:600, textTransform:"capitalize" } }, nomeMes),
+      /*#__PURE__*/React.createElement("span", { onClick: () => mudarMes(1),
+        style: { cursor:"pointer", color:"var(--text-2)", fontSize:18, padding:"2px 10px" } }, "\u203A")),
+
+    // resumo
+    /*#__PURE__*/React.createElement("div", { style: { fontSize:12, color:"var(--text-3)", marginBottom:10 } },
+      diasAtivos + " dia(s) com avanço \u00B7 " + totalMes + " passada(s) no m\u00EAs"),
+
+    // cabeçalho dos dias da semana
+    /*#__PURE__*/React.createElement("div", { style: { display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4, marginBottom:4 } },
+      ["S","T","Q","Q","S","S","D"].map((d,i) =>
+        /*#__PURE__*/React.createElement("div", { key:i,
+          style:{ textAlign:"center", fontSize:10, color:"var(--text-3)" } }, d))),
+
+    // grade do mês
+    /*#__PURE__*/React.createElement("div", { style: { display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4 } },
+      celulas.map((d,i) => {
+        if (!d) return /*#__PURE__*/React.createElement("div", { key:"v"+i });
+        const n = (porDia[d]||[]).length;
+        const sel = d === diaSel, ehHoje = d === hoje;
+        const intensidade = n === 0 ? 0 : Math.min(1, 0.25 + n * 0.2);
+        return /*#__PURE__*/React.createElement("div", {
+          key: d,
+          onClick: () => setDiaSel(d),
+          style: {
+            aspectRatio: "1",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            flexDirection: "column",
+            borderRadius: 8,
+            cursor: "pointer",
+            background: n ? "rgba(127,216,88," + intensidade + ")" : "var(--card)",
+            border: sel ? "2px solid var(--lime)" : ehHoje ? "1px solid var(--warn)" : "1px solid var(--border)",
+            color: n > 2 ? "#0b0f0c" : "var(--text-2)",
+            fontSize: 12, fontWeight: n ? 700 : 400
+          }
+        },
+          /*#__PURE__*/React.createElement("span", null, Number(d.slice(8,10))),
+          n > 0 && /*#__PURE__*/React.createElement("span", { style:{ fontSize:8, opacity:.85 } }, n));
+      })),
+
+    // detalhe do dia escolhido
+    /*#__PURE__*/React.createElement("div", { style: { marginTop:16 } },
+      /*#__PURE__*/React.createElement("div", { style:{ fontSize:12, color:"var(--text-3)", marginBottom:8 } },
+        diaSel.split("-").reverse().join("/") + (diaSel === hoje ? " \u00B7 hoje" : "")),
+      eventosDoDia.length === 0
+        ? /*#__PURE__*/React.createElement("div", { style:{ fontSize:13, color:"var(--text-3)", padding:"10px 0" } },
+            "nenhuma passada registrada neste dia")
+        : eventosDoDia.map((ev,i) =>
+            /*#__PURE__*/React.createElement("div", { key:i,
+              style:{ background:"var(--card)", border:"1px solid var(--border)", borderRadius:10,
+                      padding:"9px 12px", marginBottom:6 } },
+              /*#__PURE__*/React.createElement("div", { className:"row", style:{ justifyContent:"space-between" } },
+                /*#__PURE__*/React.createElement("span", { style:{ fontSize:13, fontWeight:600 } }, ev.projeto),
+                semanais[ev.projeto + "|" + ev.etapa] &&
+                  /*#__PURE__*/React.createElement("span", { style:{ fontSize:10, color:"var(--warn)" } }, "\uD83D\uDD01 semanal")),
+              /*#__PURE__*/React.createElement("div", { style:{ fontSize:12, color:"var(--lime)", marginTop:3 } }, "\u2713 " + ev.etapa),
+              /*#__PURE__*/React.createElement("div", { style:{ fontSize:10, color:"var(--text-3)", marginTop:3 } }, ev.categoria))))
+  );
+}
+
 function ProgressoView({
   projetos,
   log
@@ -2018,7 +2200,8 @@ function EditorModal({
   const isRotina = editing.tipo === "Rotina";
   const [projeto, setProjeto] = useState(isNew ? "" : editing.projeto);
   const [categoria, setCategoria] = useState(isNew ? CATS[0].nome : editing.categoria);
-  const [novaCategoria, setNovaCategoria] = useState(false); // criando categoria nova?
+  const [novaCategoria, setNovaCategoria] = useState(false);
+  const [escola, setEscola] = useState(isNew ? "" : editing.escola || ""); // criando categoria nova?
   const [novoNome, setNovoNome] = useState("");
   const [novoEmoji, setNovoEmoji] = useState("📌");
   const [rotinaFreq, setRotinaFreq] = useState(editing.rotinaFreq || "Diaria");
@@ -2028,6 +2211,7 @@ function EditorModal({
     id: uid()
   }] : editing.etapas.map(e => ({
     texto: e.texto,
+    semanal: !!e.semanal,
     meta: e.meta || DEFAULT_META,
     id: e.id,
     passadas: e.passadas || 0,
@@ -2050,6 +2234,7 @@ function EditorModal({
       projId: !isNew && editing.projId ? editing.projId : uid(),
       projeto: projeto.trim() || "Sem nome",
       categoria: catFinal,
+      escola,
       emoji,
       tipo: editing.tipo,
       rotinaFreq,
@@ -2061,6 +2246,7 @@ function EditorModal({
         return {
           id: et.id || uid(),
           texto: et.texto.trim(),
+          semanal: !!et.semanal,
           ordem: i,
           meta,
           passadas,
@@ -2106,7 +2292,19 @@ function EditorModal({
     style: {
       marginBottom: 14
     }
-  }, /*#__PURE__*/React.createElement("label", null, "Categoria"), !novaCategoria ? /*#__PURE__*/React.createElement("select", {
+  }, /*#__PURE__*/React.createElement("label", null, "Escola do jogo"),
+  /*#__PURE__*/React.createElement("select", {
+    value: escola,
+    onChange: e => setEscola(e.target.value),
+    style: { marginBottom: 14 }
+  }, ESCOLAS_JOGO.map(e => /*#__PURE__*/React.createElement("option", {
+    key: e.id || "nenhuma",
+    value: e.id
+  }, e.icone, " ", e.nome))),
+  /*#__PURE__*/React.createElement("div", {
+    style: { fontSize: 11, color: "var(--text-3)", marginTop: -8, marginBottom: 12 }
+  }, "define para qual escola este projeto d\u00E1 poder no jogo"),
+  /*#__PURE__*/React.createElement("label", null, "Categoria"), !novaCategoria ? /*#__PURE__*/React.createElement("select", {
     value: categoria,
     onChange: e => {
       if (e.target.value === "__nova__") {
@@ -2287,6 +2485,16 @@ function EditorModal({
       padding: "9px 4px"
     }
   }), /*#__PURE__*/React.createElement("span", {
+    onClick: () => setEt(i, { semanal: !et.semanal }),
+    title: et.semanal ? "reinicia toda segunda-feira" : "nao reinicia",
+    style: {
+      cursor: "pointer",
+      fontSize: 14,
+      padding: "0 3px",
+      opacity: et.semanal ? 1 : 0.3,
+      filter: et.semanal ? "none" : "grayscale(1)"
+    }
+  }, "\uD83D\uDD01"), /*#__PURE__*/React.createElement("span", {
     onClick: () => setEtapas(etapas.filter((_, j) => j !== i)),
     style: {
       cursor: "pointer",
