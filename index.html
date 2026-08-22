@@ -486,7 +486,7 @@ function chaveSemana(d) {
   return isoLocal(dt);
 }
 
-/* ============ RECORRENCIA ============ */
+/* ============ RECORRENCIA (no PROJETO, nao na etapa) ============ */
 const DIAS_CURTO = ["Seg","Ter","Qua","Qui","Sex","S\u00E1b","Dom"];
 const DIAS_MINI  = ["S","T","Q","Q","S","S","D"];
 const RECORRENCIAS = [
@@ -495,11 +495,13 @@ const RECORRENCIAS = [
   { id:"semanal", nome:"Semanal",               curto:"semanal",       icone:"\uD83D\uDD01" },
   { id:"mensal",  nome:"Mensal",                curto:"mensal",        icone:"\uD83D\uDDD3\uFE0F" }
 ];
-const recorrenciaDe = e => (e && (e.recorrencia || (e.semanal ? "semanal" : ""))) || "";
-const ehRecorrente  = e => !!recorrenciaDe(e);
+// dias que uma etapa concluida ainda fica visivel na trilha antes de ser arquivada
+const ARQUIVO_DIAS = 7;
+
+const recorrenciaDe = o => (o && (o.recorrencia || (o.semanal ? "semanal" : ""))) || "";
+const ehRecorrente  = o => !!recorrenciaDe(o);
 const infoRec = r => RECORRENCIAS.find(x => x.id === (r || "")) || RECORRENCIAS[0];
 
-// segunda-feira da semana de um ISO (versao local, sem UTC)
 const diaLocal   = iso => new Date(iso + "T00:00:00");
 const chaveSemanaISO = iso => chaveSemana(diaLocal(iso));
 const idxDia     = iso => (diaLocal(iso).getDay() + 6) % 7;   // 0 = segunda
@@ -507,39 +509,90 @@ const chaveMes   = iso => String(iso || todayISO()).slice(0, 7);
 const somaDias   = (iso, n) => { const d = diaLocal(iso); d.setDate(d.getDate() + n); return isoLocal(d); };
 const diasNoMesDe = iso => new Date(Number(iso.slice(0,4)), Number(iso.slice(5,7)), 0).getDate();
 
-// a qual periodo pertence um check-in feito em `iso`
-function periodoDe(e, iso) {
-  const r = recorrenciaDe(e);
-  if (r === "diaria")  return iso;
-  if (r === "semanal") return chaveSemanaISO(iso);
-  if (r === "mensal")  return chaveMes(iso);
-  return "";
+// resumo legivel da recorrencia de um projeto -> "Seg, Qui" / "diaria" / "dia 5"
+function resumoRec(p) {
+  const r = recorrenciaDe(p);
+  if (!r) return "";
+  if (r === "diaria") return "todo dia";
+  if (r === "semanal") {
+    const d = p.dias || [];
+    return d.length ? d.slice().sort((a,b)=>a-b).map(i => DIAS_CURTO[i]).join(", ") : "semana toda";
+  }
+  const dm = Number(p.diaMes || 0);
+  return dm ? "dia " + dm : "m\u00EAs todo";
 }
-// a etapa esta prevista para este dia?
-function etapaNoDia(e, iso) {
-  const r = recorrenciaDe(e);
+
+// o projeto esta previsto para este dia?
+function previstoNoDia(p, iso) {
+  const r = recorrenciaDe(p);
   if (!r) return false;
   if (r === "diaria") return true;
   if (r === "semanal") {
-    const dias = e.dias || [];
+    const dias = p.dias || [];
     return dias.length ? dias.indexOf(idxDia(iso)) !== -1 : true;
   }
   if (r === "mensal") {
-    const dm = Number(e.diaMes || 0);
+    const dm = Number(p.diaMes || 0);
     if (!dm) return true;
     return Number(iso.slice(8,10)) === Math.min(dm, diasNoMesDe(iso));
   }
   return false;
 }
-// quantos check-ins essa etapa tem no periodo que contem `iso`
-function feitasNoPeriodo(log, projeto, etapaTexto, e, iso) {
-  const alvo = periodoDe(e, iso);
-  if (!alvo) return 0;
-  return (log || []).filter(ev => ev.projeto === projeto && ev.etapa === etapaTexto
-    && periodoDe(e, String(ev.data).slice(0,10)) === alvo).length;
+
+// primeira etapa nao concluida = "voce esta aqui"
+const etapaVigente = p => (p.etapas || []).find(e => !e.concluida) || null;
+
+// quantos check-ins o projeto teve neste dia
+const feitoNoDia = (log, projeto, iso) => (log || []).filter(ev =>
+  ev.projeto === projeto && String(ev.data).slice(0,10) === iso).length;
+
+/* Etapas concluidas ha mais de ARQUIVO_DIAS saem da trilha.
+   O historico NAO se perde: cada passada ja esta registrada no Log.
+   Guarda de seguranca: so arquiva o que tem registro no Log. */
+function arquivarConcluidas(projects, log) {
+  const limite = somaDias(todayISO(), -ARQUIVO_DIAS);
+  const temLog = {};
+  (log || []).forEach(ev => { temLog[ev.projeto + "|" + ev.etapa] = true; });
+  return (projects || []).map(p => {
+    if (p.tipo !== "Projeto" || !p.etapas || !p.etapas.length) return p;
+    const etapas = p.etapas.filter(e =>
+      !(e.concluida && e.concluidaEm && e.concluidaEm < limite && temLog[p.projeto + "|" + e.texto]));
+    return etapas.length === p.etapas.length ? p : { ...p, etapas };
+  });
 }
-const feitoNoDia = (log, projeto, etapaTexto, iso) => (log || []).filter(ev =>
-  ev.projeto === projeto && ev.etapa === etapaTexto && String(ev.data).slice(0,10) === iso).length;
+
+/* Migracao: versoes antigas guardavam recorrencia por etapa e nao tinham
+   data de conclusao. Sobe a recorrencia pro projeto e deduz a data pelo Log. */
+function migrarProjetos(projects, log) {
+  const ultimo = {};
+  (log || []).forEach(ev => {
+    const k = ev.projeto + "|" + ev.etapa, d = String(ev.data).slice(0,10);
+    if (!ultimo[k] || d > ultimo[k]) ultimo[k] = d;
+  });
+  return (projects || []).map(p => {
+    const np = { ...p };
+    if (!recorrenciaDe(np)) {
+      const fonte = (p.etapas || []).find(e => ehRecorrente(e));
+      if (fonte) {
+        np.recorrencia = recorrenciaDe(fonte);
+        np.dias = fonte.dias || [];
+        np.diaMes = Number(fonte.diaMes || 0);
+      }
+    }
+    np.dias = np.dias || [];
+    np.diaMes = Number(np.diaMes || 0);
+    np.etapas = (p.etapas || []).map(e => {
+      const ne = { ...e };
+      delete ne.recorrencia; delete ne.dias; delete ne.diaMes; delete ne.semanal;
+      if (ne.concluida && !ne.concluidaEm) {
+        ne.concluidaEm = ultimo[p.projeto + "|" + e.texto] || p.ultimoAvanco || todayISO();
+      }
+      if (!ne.concluida) ne.concluidaEm = "";
+      return ne;
+    });
+    return np;
+  });
+}
 
 function rowsToProjects(rows) {
   const map = {};
@@ -557,11 +610,21 @@ function rowsToProjects(rows) {
         favorito: !!r.favorito,
         ultimoAvanco: r.ultimoAvanco || "",
         escola: r.escola || "",
+        recorrencia: "",
+        dias: [],
+        diaMes: 0,
         etapas: []
       };
     }
     map[key].favorito = map[key].favorito || !!r.favorito;
     if (r.escola && !map[key].escola) map[key].escola = r.escola;
+    // recorrencia agora e do PROJETO: pega da primeira linha que tiver
+    const recLinha = r.recorrencia || (r.semanal ? "semanal" : "");
+    if (recLinha && !map[key].recorrencia) {
+      map[key].recorrencia = recLinha;
+      map[key].dias = r.dias ? String(r.dias).split(",").map(Number).filter(n => !isNaN(n)) : [];
+      map[key].diaMes = Number(r.diaMes || 0);
+    }
     if (r.ultimoAvanco > map[key].ultimoAvanco) map[key].ultimoAvanco = r.ultimoAvanco;
     if (r.etapa && String(r.etapa).trim() !== "") {
       map[key].etapas.push({
@@ -571,10 +634,7 @@ function rowsToProjects(rows) {
         meta: r.meta || DEFAULT_META,
         passadas: r.passadas || 0,
         concluida: !!r.concluida,
-        semanal: !!r.semanal,
-        recorrencia: r.recorrencia || (r.semanal ? "semanal" : ""),
-        dias: r.dias ? String(r.dias).split(",").map(Number).filter(n => !isNaN(n)) : [],
-        diaMes: Number(r.diaMes || 0)
+        concluidaEm: r.concluidaEm ? String(r.concluidaEm).slice(0, 10) : ""
       });
     }
   });
@@ -601,11 +661,12 @@ function projectsToRows(projects) {
         meta: 3,
         passadas: 0,
         concluida: false,
+        concluidaEm: "",
         escola: p.escola || "",
-        semanal: false,
-        recorrencia: "",
-        dias: "",
-        diaMes: 0,
+        semanal: recorrenciaDe(p) === "semanal",
+        recorrencia: recorrenciaDe(p),
+        dias: (p.dias || []).join(","),
+        diaMes: Number(p.diaMes || 0),
         favorito: p.favorito,
         ultimoAvanco: p.ultimoAvanco
       });
@@ -625,11 +686,12 @@ function projectsToRows(projects) {
         meta: e.meta || DEFAULT_META,
         passadas: e.passadas || 0,
         concluida: e.concluida,
+        concluidaEm: e.concluidaEm || "",
         escola: p.escola || "",
-        semanal: recorrenciaDe(e) === "semanal",
-        recorrencia: recorrenciaDe(e),
-        dias: (e.dias || []).join(","),
-        diaMes: Number(e.diaMes || 0),
+        semanal: recorrenciaDe(p) === "semanal",
+        recorrencia: recorrenciaDe(p),
+        dias: (p.dias || []).join(","),
+        diaMes: Number(p.diaMes || 0),
         favorito: p.favorito,
         ultimoAvanco: p.ultimoAvanco
       });
@@ -653,7 +715,6 @@ async function apiCall(payload) {
 function App() {
   const [projects, setProjects] = useState([]);
   const [ordemCat, setOrdemCat] = useState([]);
-  const [marcadores, setMarcadores] = useState(() => marcadoresHoje()); // controle de reset das recorrentes
   const [log, setLog] = useState([]); // eventos de avanço: {data, projeto, categoria, etapa}
   const [loaded, setLoaded] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // status do PULL manual: idle|saving|ok|err|noapi
@@ -672,10 +733,10 @@ function App() {
     if (raw) {
       try {
         const data = JSON.parse(raw);
-        const rs = resetRecorrentes(resetRotinas(data.projects || []), data.marcadores);
-        setProjects(rs.projects);
-        setMarcadores(rs.marc);
-        setLog(data.log || []);
+        const logSalvo = data.log || [];
+        const migrados = migrarProjetos(data.projects || [], logSalvo);
+        setProjects(arquivarConcluidas(resetRotinas(migrados), logSalvo));
+        setLog(logSalvo);
         setOrdemCat(data.ordemCat || []);
       } catch (e) {}
     }
@@ -689,11 +750,10 @@ function App() {
       projects,
       log,
       ordemCat,
-      marcadores,
       savedAt: Date.now()
     }));
     dirty.current = true;
-  }, [projects, log, ordemCat, marcadores, loaded]);
+  }, [projects, log, ordemCat, loaded]);
 
   // Auto-push pro Sheets (debounce 2s após a última mudança)
   useEffect(() => {
@@ -727,32 +787,7 @@ function App() {
     };
   }, [projects, log, loaded]);
 
-  /* Etapas recorrentes voltam ao zero quando vira o periodo:
-     diaria -> todo dia 00h | semanal -> toda segunda | mensal -> todo dia 1.
-     O historico NAO se perde: os check-ins ficam registrados no Log. */
-function marcadoresHoje() {
-  const h = todayISO();
-  return { dia: h, semana: chaveSemanaISO(h), mes: chaveMes(h) };
-}
-function resetRecorrentes(projects, marc) {
-  const atual = marcadoresHoje();
-  const m = marc || {};
-  const zera = {
-    diaria:  m.dia    !== atual.dia,
-    semanal: m.semana !== atual.semana,
-    mensal:  m.mes    !== atual.mes
-  };
-  if (!zera.diaria && !zera.semanal && !zera.mensal) return { projects, marc: atual };
-  const novos = projects.map(p => {
-    if (!p.etapas || !p.etapas.some(ehRecorrente)) return p;
-    return { ...p, etapas: p.etapas.map(e => {
-      const r = recorrenciaDe(e);
-      return (r && zera[r]) ? { ...e, passadas: 0, concluida: false } : e;
-    }) };
-  });
-  return { projects: novos, marc: atual };
-}
-
+  /* Rotinas voltam ao zero quando vira o dia (ou a semana). */
 function resetRotinas(list) {
     return list.map(p => {
       if (p.tipo !== "Rotina") return p;
@@ -878,9 +913,12 @@ function resetRotinas(list) {
   }
   // +1 passada na etapa atual; fecha a etapa ao atingir a meta de repetições
   // +1 passada na etapa atual da TRILHA (etapas recorrentes ficam de fora)
-  function avancar(target) {
+  // +1 passada na etapa vigente. dataISO permite check-in retroativo.
+  function avancar(target, dataISO) {
+    const dia = dataISO || todayISO();
+    if (dia > todayISO()) return;
     const etapas0 = target.etapas || [];
-    const next = etapas0.findIndex(e => !e.concluida && !ehRecorrente(e));
+    const next = etapas0.findIndex(e => !e.concluida);
     if (next < 0) return;
     const alvo = etapas0[next];
     const meta = alvo.meta || 1;
@@ -890,11 +928,11 @@ function resetRotinas(list) {
     setProjects(prev => prev.map(p => {
       if (p !== target) return p;
       const etapas = [...p.etapas];
-      etapas[next] = { ...alvo, passadas, concluida: fechou };
-      return { ...p, etapas, ultimoAvanco: todayISO() };
+      etapas[next] = { ...alvo, passadas, concluida: fechou, concluidaEm: fechou ? dia : "" };
+      return { ...p, etapas, ultimoAvanco: dia > (p.ultimoAvanco || "") ? dia : p.ultimoAvanco };
     }));
     setLog(prev => [...prev, {
-      data: todayISO(),
+      data: dia,
       projeto: target.projeto,
       categoria: target.categoria,
       etapa: alvo.texto
@@ -904,64 +942,46 @@ function resetRotinas(list) {
       projeto: target.projeto,
       emoji: target.emoji,
       etapa: alvo.texto,
-      restantes: etapas0.filter((e, i) => i !== next && !e.concluida && !ehRecorrente(e)).length
+      meta: meta,
+      restantes: etapas0.filter((e, k) => k !== next && !e.concluida).length
     });
   }
 
-  /* ---- CHECK-INS (aba de recorrencia) ---- */
-  // registra 1 check-in de uma etapa recorrente num dia especifico
-  function checkinEtapa(target, etapaId, dataISO) {
-    const et = (target.etapas || []).find(e => e.id === etapaId);
-    if (!et || dataISO > todayISO()) return;
-    const meta = et.meta || 1;
-    if (feitasNoPeriodo(log, target.projeto, et.texto, et, dataISO) >= meta) return;
-    setLog(prev => [...prev, {
-      data: dataISO,
-      categoria: target.categoria,
-      projeto: target.projeto,
-      etapa: et.texto
-    }]);
-    if (periodoDe(et, dataISO) === periodoDe(et, todayISO())) {
-      setProjects(prev => prev.map(p => p !== target ? p : {
-        ...p,
-        etapas: p.etapas.map(e => {
-          if (e.id !== etapaId) return e;
-          const pas = Math.min((e.passadas || 0) + 1, meta);
-          return { ...e, passadas: pas, concluida: pas >= meta };
-        }),
-        ultimoAvanco: dataISO > (p.ultimoAvanco || "") ? dataISO : p.ultimoAvanco
-      }));
-    }
-  }
-  // desfaz o check-in daquele dia
-  function desfazerCheckin(target, etapaId, dataISO) {
-    const et = (target.etapas || []).find(e => e.id === etapaId);
-    if (!et) return;
-    const meta = et.meta || 1;
+  /* ---- CHECK-INS ---- */
+  // desfaz o ultimo check-in do projeto naquele dia
+  function desfazerCheckin(target, dataISO) {
     const rev = [...log].reverse().findIndex(ev =>
-      ev.projeto === target.projeto && ev.etapa === et.texto && String(ev.data).slice(0,10) === dataISO);
+      ev.projeto === target.projeto && String(ev.data).slice(0, 10) === dataISO);
     if (rev === -1) return;
     const real = log.length - 1 - rev;
-    setLog(log.filter((_, j) => j !== real));
-    if (periodoDe(et, dataISO) === periodoDe(et, todayISO())) {
-      setProjects(prev => prev.map(p => p !== target ? p : {
-        ...p,
-        etapas: p.etapas.map(e => e.id !== etapaId ? e
-          : { ...e, passadas: Math.max(0, (e.passadas || 0) - 1), concluida: false })
-      }));
-    }
+    const etapaTexto = log[real].etapa;
+    setLog(log.filter((_, k) => k !== real));
+    setProjects(prev => prev.map(p => {
+      if (p !== target) return p;
+      const idx = p.etapas.findIndex(e => e.texto === etapaTexto);
+      if (idx === -1) return p;
+      const etapas = [...p.etapas];
+      const e = etapas[idx];
+      etapas[idx] = {
+        ...e,
+        passadas: Math.max(0, (e.passadas || 0) - 1),
+        concluida: false,
+        concluidaEm: ""
+      };
+      return { ...p, etapas };
+    }));
   }
-  // check-in de rotina em qualquer dia (hoje tambem atualiza o estado do card)
+  // check-in de rotina em qualquer dia (hoje tambem atualiza o card)
   function checkinRotina(target, dataISO) {
     const hoje = todayISO();
     if (dataISO > hoje) return;
-    const jaFeita = feitoNoDia(log, target.projeto, target.projeto, dataISO) > 0;
+    const jaFeita = feitoNoDia(log, target.projeto, dataISO) > 0;
     if (jaFeita) {
       const rev = [...log].reverse().findIndex(ev =>
-        ev.projeto === target.projeto && String(ev.data).slice(0,10) === dataISO);
+        ev.projeto === target.projeto && String(ev.data).slice(0, 10) === dataISO);
       if (rev !== -1) {
         const real = log.length - 1 - rev;
-        setLog(log.filter((_, j) => j !== real));
+        setLog(log.filter((_, k) => k !== real));
       }
     } else {
       setLog(prev => [...prev, {
@@ -984,8 +1004,8 @@ function resetRotinas(list) {
       }));
     }
   }
-  // adiciona etapa nova ao fim da trilha (usado pelo aviso "etapa concluida")
-  function addEtapa(projId, texto, recorrencia) {
+  // adiciona etapa nova ao fim da trilha
+  function addEtapa(projId, texto, meta) {
     const t = String(texto || "").trim();
     if (!t) return;
     setProjects(prev => prev.map(p => p.projId !== projId ? p : {
@@ -994,18 +1014,14 @@ function resetRotinas(list) {
         id: uid(),
         texto: t,
         ordem: p.etapas.length,
-        meta: DEFAULT_META,
+        meta: Math.max(1, parseInt(meta) || DEFAULT_META),
         passadas: 0,
         concluida: false,
-        semanal: recorrencia === "semanal",
-        recorrencia: recorrencia || "",
-        dias: [],
-        diaMes: 0
+        concluidaEm: ""
       }]
     }));
   }
-  // Clique numa etapa: -1 passada (corrige toque errado) ou reabre se concluída
-  // Não mexe em ultimoAvanco — correção não é avanço real.
+
   function toggleEtapa(target, etapaId) {
     setProjects(prev => prev.map(p => {
       if (p !== target) return p;
@@ -1015,13 +1031,15 @@ function resetRotinas(list) {
         if (e.concluida) return {
           ...e,
           concluida: false,
+          concluidaEm: "",
           passadas: Math.max(0, meta - 1)
         };
         const passadas = Math.max(0, (e.passadas || 0) - 1);
         return {
           ...e,
           passadas,
-          concluida: false
+          concluida: false,
+          concluidaEm: ""
         };
       });
       return {
@@ -1068,10 +1086,10 @@ function resetRotinas(list) {
         action: "getLog"
       });
       if (r.ok) {
-        const rs2 = resetRecorrentes(resetRotinas(rowsToProjects(r.rows)), marcadores);
-        setProjects(rs2.projects);
-        setMarcadores(rs2.marc);
-        if (rl.ok) setLog(rl.log || []);
+        const logNuvem = (rl.ok && rl.log) ? rl.log : [];
+        const migrados2 = migrarProjetos(rowsToProjects(r.rows), logNuvem);
+        setProjects(arquivarConcluidas(resetRotinas(migrados2), logNuvem));
+        if (rl.ok) setLog(logNuvem);
         firstSave.current = true; // não re-empurra logo após puxar
         setPullReminder(false); // já puxou, pode mexer
         setSyncState("ok");
@@ -1097,7 +1115,7 @@ function resetRotinas(list) {
     projetos: projetos,
     rotinas: rotinas,
     log: log,
-    onCheckin: checkinEtapa,
+    onCheckin: avancar,
     onDesfazer: desfazerCheckin,
     onCheckinRotina: checkinRotina,
     onEdit: p => setEditing({ ref: p, ...p })
@@ -1154,8 +1172,6 @@ function resetRotinas(list) {
         projetos: porCategoria[nome],
         onAvancar: avancar,
         onVoltar: voltar,
-        onCheckin: checkinEtapa,
-        onDesfazer: desfazerCheckin,
         onToggleEtapa: toggleEtapa,
         onFav: toggleFav,
         onEdit: p => setEditing({
@@ -1179,8 +1195,12 @@ function resetRotinas(list) {
     onRemove: removeProject
   })), aviso && /*#__PURE__*/React.createElement(AvisoEtapaConcluida, {
     aviso: aviso,
-    onNova: (texto, rec) => {
-      addEtapa(aviso.projId, texto, rec);
+    onRecriar: () => {
+      addEtapa(aviso.projId, aviso.etapa, aviso.meta);
+      setAviso(null);
+    },
+    onNova: texto => {
+      addEtapa(aviso.projId, texto, DEFAULT_META);
       setAviso(null);
     },
     onFechar: () => setAviso(null)
@@ -1473,8 +1493,6 @@ function CategoriaBloco({
   projetos,
   onAvancar,
   onVoltar,
-  onCheckin,
-  onDesfazer,
   onToggleEtapa,
   onFav,
   onEdit,
@@ -1568,8 +1586,6 @@ function CategoriaBloco({
     p: p,
     onAvancar: onAvancar,
     onVoltar: onVoltar,
-    onCheckin: onCheckin,
-    onDesfazer: onDesfazer,
     onToggleEtapa: onToggleEtapa,
     onFav: onFav,
     onEdit: onEdit,
@@ -1583,8 +1599,6 @@ function ProjectCard({
   p,
   onAvancar,
   onVoltar,
-  onCheckin,
-  onDesfazer,
   onToggleEtapa,
   onFav,
   onEdit,
@@ -1594,9 +1608,8 @@ function ProjectCard({
   isLast
 }) {
   const st = statusBadge(p);
-  const recorrentes = p.etapas.filter(ehRecorrente);
-  const lineares = p.etapas.filter(e => !ehRecorrente(e));
-  const nextIdx = p.etapas.findIndex(e => !e.concluida && !ehRecorrente(e));
+  const rec = recorrenciaDe(p);
+  const nextIdx = p.etapas.findIndex(e => !e.concluida);
   return /*#__PURE__*/React.createElement("div", {
     className: "fade",
     style: {
@@ -1632,7 +1645,15 @@ function ProjectCard({
       fontSize: 14,
       fontWeight: 600
     }
-  }, p.emoji, " ", p.projeto)), /*#__PURE__*/React.createElement("div", {
+  }, p.emoji, " ", p.projeto), rec && /*#__PURE__*/React.createElement("span", {
+    className: "chip",
+    title: "recorr\u00EAncia do projeto",
+    style: {
+      background: "var(--lime-soft)",
+      color: "var(--lime)",
+      flex: "none"
+    }
+  }, infoRec(rec).icone, " ", resumoRec(p))), /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
       gap: 10,
@@ -1678,7 +1699,6 @@ function ProjectCard({
       padding: "2px 3px"
     }
   }, "✎"))), /*#__PURE__*/React.createElement("div", null, p.etapas.map((e, i) => {
-    if (ehRecorrente(e)) return null;
     const isNext = i === nextIdx;
     const meta = e.meta || 1;
     const pas = e.passadas || 0;
@@ -1814,78 +1834,13 @@ function ProjectCard({
       color: "var(--text-3)",
       padding: "6px 0"
     }
-  }, "Sem etapas ainda — toque em ✎ para adicionar."), nextIdx === -1 && lineares.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Sem etapas ainda — toque em ✎ para adicionar."), nextIdx === -1 && p.etapas.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: "var(--lime)",
       padding: "6px 0"
     }
-  }, "🎉 Trilha completa!"), recorrentes.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 10,
-      paddingTop: 9,
-      borderTop: "1px dashed var(--border-strong)"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10,
-      color: "var(--text-3)",
-      marginBottom: 5
-    }
-  }, "\uD83D\uDD01 Recorrentes"), recorrentes.map(e => {
-    const meta = e.meta || 1;
-    const pas = e.passadas || 0;
-    const info = infoRec(recorrenciaDe(e));
-    const feita = pas >= meta;
-    return /*#__PURE__*/React.createElement("div", {
-      key: e.id,
-      className: "row",
-      style: {
-        gap: 9,
-        padding: "5px 0",
-        cursor: "pointer",
-        opacity: feita ? 0.6 : 1
-      },
-      onClick: () => {
-        if (!onCheckin) return;
-        if (feita) onDesfazer && onDesfazer(p, e.id, todayISO());
-        else onCheckin(p, e.id, todayISO());
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: 16,
-        height: 16,
-        borderRadius: 4,
-        flex: "none",
-        background: feita ? "var(--done)" : "transparent",
-        border: feita ? "1px solid var(--done)" : "1.5px solid var(--text-3)",
-        color: "#0b0f0c",
-        fontSize: 11,
-        fontWeight: 700
-      }
-    }, feita ? "\u2713" : ""), /*#__PURE__*/React.createElement("span", {
-      style: {
-        flex: 1,
-        fontSize: 13,
-        color: feita ? "var(--done-text)" : "var(--text-2)"
-      }
-    }, e.texto), meta > 1 && /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 10,
-        color: "var(--text-3)",
-        letterSpacing: 1.5
-      }
-    }, "\u25CF".repeat(Math.min(pas, meta)) + "\u25CB".repeat(Math.max(0, meta - pas))), /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 10,
-        color: "var(--text-3)",
-        flex: "none"
-      }
-    }, info.icone, " ", info.curto));
-  }))));
+  }, "\uD83C\uDF89 Trilha completa \u2014 toque em \u270E para definir a pr\u00F3xima")));
 }
 function RotinasFooter({
   rotinas,
@@ -2031,59 +1986,46 @@ function LineChart({
    CALENDÁRIO — o registro transparente do que foi feito.
    Lê o Log (que é a mesma fonte que o jogo usa para dar XP).
    ========================================================== */
-/* ============ ABA CHECK-INS ============ */
+/* ============ ABA CHECK-INS (por PROJETO) ============ */
 function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckinRotina, onEdit }) {
   const hoje = todayISO();
   const [diaSel, setDiaSel] = useState(hoje);
   const inicio = chaveSemanaISO(diaSel);
   const dias = Array.from({ length: 7 }, (_, i) => somaDias(inicio, i));
 
-  const itens = useMemo(() => {
-    const out = [];
-    (projetos || []).forEach(p => (p.etapas || []).forEach(e => {
-      if (ehRecorrente(e) && etapaNoDia(e, diaSel)) out.push({ p, e });
-    }));
-    return out;
-  }, [projetos, diaSel]);
+  const itens = useMemo(
+    () => (projetos || []).filter(p => ehRecorrente(p) && previstoNoDia(p, diaSel)),
+    [projetos, diaSel]);
 
   const rots = rotinas || [];
-  const feitosNoDia = iso => (log || []).filter(ev => String(ev.data).slice(0, 10) === iso).length;
-  const okItens = itens.filter(it => feitoNoDia(log, it.p.projeto, it.e.texto, diaSel) > 0).length;
-  const okRots = rots.filter(r => feitoNoDia(log, r.projeto, r.projeto, diaSel) > 0).length;
+  const totalDia = iso => (log || []).filter(ev => String(ev.data).slice(0, 10) === iso).length;
+  const ok = itens.filter(p => feitoNoDia(log, p.projeto, diaSel) > 0).length
+           + rots.filter(r => feitoNoDia(log, r.projeto, diaSel) > 0).length;
   const total = itens.length + rots.length;
-  const feitos = okItens + okRots;
-  const pct = total ? Math.round(feitos / total * 100) : 0;
+  const pct = total ? Math.round(ok / total * 100) : 0;
 
   const labelSemana = (() => {
     const a = diaLocal(dias[0]), b = diaLocal(dias[6]);
-    const mA = a.toLocaleDateString("pt-BR", { month: "short" }).replace(".", "");
-    const mB = b.toLocaleDateString("pt-BR", { month: "short" }).replace(".", "");
-    return a.getDate() + " " + mA + " \u2013 " + b.getDate() + " " + mB;
+    const m = d => d.toLocaleDateString("pt-BR", { month: "short" }).replace(".", "");
+    return a.getDate() + " " + m(a) + " \u2013 " + b.getDate() + " " + m(b);
   })();
   const labelDia = (() => {
-    const d = diaLocal(diaSel);
-    const s = d.toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
-    return diaSel === hoje ? s + " \u00B7 hoje" : s;
+    const t = diaLocal(diaSel).toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
+    return diaSel === hoje ? t + " \u00B7 hoje" : t;
   })();
 
-  const mudarSemana = n => setDiaSel(somaDias(diaSel, n * 7));
-
-  // linha de check-in genérica
-  const linha = (key, emoji, titulo, sub, feita, bloqueada, dots, acao) =>
+  const cartao = (key, emoji, titulo, sub, feita, bloqueada, dots, extra, acao) =>
     /*#__PURE__*/React.createElement("div", {
       key: key,
       className: "row",
       onClick: () => { if (!bloqueada) acao(); },
       style: {
-        gap: 11,
-        alignItems: "center",
+        gap: 11, alignItems: "center",
         background: feita ? "transparent" : "var(--card)",
         border: "1px solid " + (feita ? "transparent" : "var(--border)"),
-        borderRadius: 11,
-        padding: "11px 12px",
-        marginBottom: 6,
+        borderRadius: 11, padding: "11px 12px", marginBottom: 6,
         cursor: bloqueada ? "default" : "pointer",
-        opacity: bloqueada ? 0.4 : feita ? 0.65 : 1
+        opacity: bloqueada ? 0.45 : feita ? 0.68 : 1
       }
     },
       /*#__PURE__*/React.createElement("span", {
@@ -2098,14 +2040,16 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
       /*#__PURE__*/React.createElement("div", { style: { flex: 1, minWidth: 0 } },
         /*#__PURE__*/React.createElement("div", {
           style: {
-            fontSize: 13.5, fontWeight: 600,
-            color: feita ? "var(--done-text)" : "var(--text)",
-            textDecoration: feita ? "line-through" : "none",
+            fontSize: 11, color: "var(--text-3)",
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
           }
         }, emoji + " " + titulo),
-        sub && /*#__PURE__*/React.createElement("div", {
-          style: { fontSize: 10.5, color: "var(--text-3)", marginTop: 2 }
+        /*#__PURE__*/React.createElement("div", {
+          style: {
+            fontSize: 13.5, fontWeight: 600, marginTop: 2,
+            color: extra ? "var(--warn)" : feita ? "var(--done-text)" : "var(--text)",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
+          }
         }, sub)),
       dots && /*#__PURE__*/React.createElement("span", {
         style: { fontSize: 11, color: "var(--text-3)", letterSpacing: 1.5, flex: "none" }
@@ -2113,28 +2057,24 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
 
   return /*#__PURE__*/React.createElement("div", { className: "fade" },
 
-    // navegação da semana
     /*#__PURE__*/React.createElement("div", {
       className: "row", style: { justifyContent: "space-between", marginBottom: 10 }
     },
       /*#__PURE__*/React.createElement("span", {
-        onClick: () => mudarSemana(-1),
+        onClick: () => setDiaSel(somaDias(diaSel, -7)),
         style: { cursor: "pointer", color: "var(--text-2)", fontSize: 18, padding: "2px 10px" }
       }, "\u2039"),
+      /*#__PURE__*/React.createElement("span", { style: { fontSize: 14, fontWeight: 600 } }, labelSemana),
       /*#__PURE__*/React.createElement("span", {
-        style: { fontSize: 14, fontWeight: 600 }
-      }, labelSemana),
-      /*#__PURE__*/React.createElement("span", {
-        onClick: () => mudarSemana(1),
+        onClick: () => setDiaSel(somaDias(diaSel, 7)),
         style: { cursor: "pointer", color: "var(--text-2)", fontSize: 18, padding: "2px 10px" }
       }, "\u203A")),
 
-    // trilha de dias da semana
     /*#__PURE__*/React.createElement("div", {
       style: { display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 5 }
     }, dias.map((d, i) => {
       const sel = d === diaSel, ehHoje = d === hoje, futuro = d > hoje;
-      const n = feitosNoDia(d);
+      const n = totalDia(d);
       return /*#__PURE__*/React.createElement("div", {
         key: d,
         onClick: () => setDiaSel(d),
@@ -2161,7 +2101,6 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
         }));
     })),
 
-    // cabeçalho do dia + progresso
     /*#__PURE__*/React.createElement("div", { style: { marginTop: 18, marginBottom: 12 } },
       /*#__PURE__*/React.createElement("div", {
         className: "row", style: { justifyContent: "space-between", alignItems: "baseline" }
@@ -2175,7 +2114,7 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
         }, "ir para hoje")),
       /*#__PURE__*/React.createElement("div", {
         style: { fontSize: 11.5, color: "var(--text-3)", margin: "5px 0 7px" }
-      }, total ? feitos + " de " + total + " check-in(s)" : "nada previsto para este dia"),
+      }, total ? ok + " de " + total + " check-in(s)" : "nada previsto para este dia"),
       total > 0 && /*#__PURE__*/React.createElement("div", {
         style: { height: 5, background: "var(--bg-elev2)", borderRadius: 4, overflow: "hidden" }
       }, /*#__PURE__*/React.createElement("div", {
@@ -2189,37 +2128,32 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
       }
     }, "\u26A0\uFE0F dia futuro \u2014 s\u00F3 d\u00E1 pra ver o que est\u00E1 previsto"),
 
-    // etapas recorrentes
     itens.length > 0 && /*#__PURE__*/React.createElement("div", { style: { marginBottom: 16 } },
       /*#__PURE__*/React.createElement("div", {
         style: { fontSize: 11, fontWeight: 600, color: "var(--text-2)", marginBottom: 7 }
-      }, "\uD83D\uDD01 Etapas recorrentes"),
-      itens.map(it => {
-        const { p, e } = it;
-        const meta = e.meta || 1;
-        const noDia = feitoNoDia(log, p.projeto, e.texto, diaSel);
-        const noPer = feitasNoPeriodo(log, p.projeto, e.texto, e, diaSel);
-        const info = infoRec(recorrenciaDe(e));
-        const cheio = noPer >= meta && !noDia;
-        const sub = p.projeto + " \u00B7 " + info.icone + " " + info.curto
-          + (meta > 1 ? " \u00B7 " + noPer + "/" + meta + " no per\u00EDodo" : "");
-        const dots = meta > 1
-          ? "\u25CF".repeat(Math.min(noPer, meta)) + "\u25CB".repeat(Math.max(0, meta - noPer)) : null;
-        return linha(
-          p.projId + "|" + e.id, p.emoji || "\uD83D\uDCCC", e.texto, sub,
-          noDia > 0, diaSel > hoje || cheio, dots,
-          () => noDia > 0 ? onDesfazer(p, e.id, diaSel) : onCheckin(p, e.id, diaSel));
+      }, "\uD83C\uDFAF Projetos de hoje"),
+      itens.map(p => {
+        const et = etapaVigente(p);
+        const feita = feitoNoDia(log, p.projeto, diaSel) > 0;
+        if (!et) {
+          return cartao(p.projId, p.emoji || "\uD83D\uDCCC", p.projeto,
+            "\u26A0\uFE0F sem pr\u00F3xima etapa \u2014 toque para definir",
+            false, false, null, true, () => onEdit(p));
+        }
+        const meta = et.meta || 1, pas = et.passadas || 0;
+        const dots = meta > 1 ? "\u25CF".repeat(Math.min(pas, meta)) + "\u25CB".repeat(Math.max(0, meta - pas)) : null;
+        return cartao(p.projId, p.emoji || "\uD83D\uDCCC", p.projeto, et.texto,
+          feita, diaSel > hoje, dots, false,
+          () => feita ? onDesfazer(p, diaSel) : onCheckin(p, diaSel));
       })),
 
-    // rotinas
     rots.length > 0 && /*#__PURE__*/React.createElement("div", { style: { marginBottom: 16 } },
       /*#__PURE__*/React.createElement("div", {
         style: { fontSize: 11, fontWeight: 600, color: "var(--text-2)", marginBottom: 7 }
       }, "\uD83C\uDF31 Rotinas"),
-      rots.map(r => linha(
-        "rot-" + (r.projId || r.projeto), r.emoji || "\uD83C\uDF31", r.projeto,
+      rots.map(r => cartao("rot-" + (r.projId || r.projeto), r.emoji || "\uD83C\uDF31",
         (r.rotinaFreq === "Semanal" ? "semanal" : "di\u00E1ria") + " \u00B7 " + r.categoria,
-        feitoNoDia(log, r.projeto, r.projeto, diaSel) > 0, diaSel > hoje, null,
+        r.projeto, feitoNoDia(log, r.projeto, diaSel) > 0, diaSel > hoje, null, false,
         () => onCheckinRotina(r, diaSel)))),
 
     total === 0 && /*#__PURE__*/React.createElement("div", {
@@ -2231,164 +2165,150 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
       /*#__PURE__*/React.createElement("div", { style: { fontSize: 13, color: "var(--text-2)", marginBottom: 6 } },
         "Nenhum check-in previsto"),
       /*#__PURE__*/React.createElement("div", { style: { fontSize: 11.5, color: "var(--text-3)", lineHeight: 1.5 } },
-        "Abra um projeto no \u270E e marque uma etapa como di\u00E1ria, semanal ou mensal \u2014 ela passa a aparecer aqui."))
+        "Abra um projeto no \u270E e escolha a recorr\u00EAncia \u2014 ele passa a aparecer aqui com a etapa da vez."))
   );
 }
 
-/* ============ AVISO: ETAPA CONCLUÍDA ============ */
-function AvisoEtapaConcluida({ aviso, onNova, onFechar }) {
+/* ============ AVISO: ETAPA FINALIZADA ============ */
+function AvisoEtapaConcluida({ aviso, onRecriar, onNova, onFechar }) {
   const [modo, setModo] = useState("aviso");   // aviso | nova
   const [texto, setTexto] = useState("");
-  const [rec, setRec] = useState("");
+
+  const btn = (label, primaria, acao) => /*#__PURE__*/React.createElement("button", {
+    className: "btn" + (primaria ? " btn-primary" : ""),
+    style: { width: "100%", justifyContent: "center", marginBottom: 8 },
+    onClick: acao
+  }, label);
 
   return /*#__PURE__*/React.createElement("div", { className: "modal-bg", onClick: onFechar },
     /*#__PURE__*/React.createElement("div", {
       className: "modal", onClick: e => e.stopPropagation(), style: { paddingBottom: 22 }
     },
-      /*#__PURE__*/React.createElement("div", { style: { textAlign: "center", marginBottom: 16 } },
-        /*#__PURE__*/React.createElement("div", { style: { fontSize: 34, marginBottom: 6 } }, "\u2705"),
+      /*#__PURE__*/React.createElement("div", { style: { textAlign: "center", marginBottom: 18 } },
+        /*#__PURE__*/React.createElement("div", { style: { fontSize: 38, marginBottom: 4 } }, "\uD83C\uDF89"),
         /*#__PURE__*/React.createElement("div", {
           style: { fontSize: 17, fontWeight: 700, color: "var(--lime)" }
-        }, "Etapa conclu\u00EDda"),
+        }, "Etapa finalizada"),
         /*#__PURE__*/React.createElement("div", {
           style: { fontSize: 13.5, color: "var(--text)", marginTop: 8, lineHeight: 1.4 }
         }, aviso.etapa),
         /*#__PURE__*/React.createElement("div", {
           style: { fontSize: 11.5, color: "var(--text-3)", marginTop: 4 }
         }, (aviso.emoji || "") + " " + aviso.projeto
-          + (aviso.restantes > 0 ? " \u00B7 " + aviso.restantes + " etapa(s) restante(s)" : " \u00B7 trilha completa \uD83C\uDF89"))),
+          + (aviso.restantes > 0
+              ? " \u00B7 " + aviso.restantes + " etapa(s) na fila"
+              : " \u00B7 trilha completa"))),
 
       modo === "aviso"
-        ? /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 8 } },
-            /*#__PURE__*/React.createElement("button", {
-              className: "btn btn-primary",
-              style: { flex: 1, justifyContent: "center" },
-              onClick: () => setModo("nova")
-            }, "Definir nova etapa"),
-            /*#__PURE__*/React.createElement("button", {
-              className: "btn",
-              style: { flex: 1, justifyContent: "center" },
-              onClick: onFechar
-            }, "Cancelar"))
+        ? /*#__PURE__*/React.createElement("div", null,
+            btn("\uD83D\uDD01 Recriar etapa igual", true, () => onRecriar()),
+            btn("\u270F\uFE0F Definir outra etapa", false, () => setModo("nova")),
+            btn("N\u00E3o, s\u00F3 concluir", false, onFechar),
+            /*#__PURE__*/React.createElement("div", {
+              style: { fontSize: 10.5, color: "var(--text-3)", textAlign: "center", marginTop: 4, lineHeight: 1.5 }
+            }, "etapas conclu\u00EDdas saem da trilha depois de " + ARQUIVO_DIAS
+               + " dias \u2014 o hist\u00F3rico fica no Log"))
         : /*#__PURE__*/React.createElement("div", null,
-            /*#__PURE__*/React.createElement("label", null, "Nova etapa de \u201C" + aviso.projeto + "\u201D"),
+            /*#__PURE__*/React.createElement("label", null, "Pr\u00F3xima etapa de \u201C" + aviso.projeto + "\u201D"),
             /*#__PURE__*/React.createElement("input", {
               value: texto,
               autoFocus: true,
-              placeholder: "Ex: M\u00F3dulo 4 \u2014 escalas menores",
+              placeholder: "Ex: M\u00F3d. 11 \u2014 Dor e Aprendizagem",
               onChange: e => setTexto(e.target.value),
-              onKeyDown: e => { if (e.key === "Enter" && texto.trim()) onNova(texto, rec); }
+              onKeyDown: e => { if (e.key === "Enter" && texto.trim()) onNova(texto); }
             }),
-            /*#__PURE__*/React.createElement("div", { style: { marginTop: 12 } },
-              /*#__PURE__*/React.createElement("label", null, "Recorr\u00EAncia"),
-              /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 6, flexWrap: "wrap" } },
-                RECORRENCIAS.map(r => /*#__PURE__*/React.createElement("span", {
-                  key: r.id || "none",
-                  onClick: () => setRec(r.id),
-                  style: {
-                    cursor: "pointer", fontSize: 11.5, padding: "6px 11px", borderRadius: 8,
-                    background: rec === r.id ? "var(--lime-soft)" : "var(--bg-elev2)",
-                    border: "1px solid " + (rec === r.id ? "var(--lime)" : "var(--border-strong)"),
-                    color: rec === r.id ? "var(--lime)" : "var(--text-2)"
-                  }
-                }, r.icone + " " + r.nome)))),
             /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 8, marginTop: 16 } },
               /*#__PURE__*/React.createElement("button", {
                 className: "btn btn-primary",
                 style: { flex: 1, justifyContent: "center", opacity: texto.trim() ? 1 : .45 },
-                onClick: () => { if (texto.trim()) onNova(texto, rec); }
-              }, "Adicionar etapa"),
+                onClick: () => { if (texto.trim()) onNova(texto); }
+              }, "Adicionar"),
               /*#__PURE__*/React.createElement("button", {
-                className: "btn", style: { flex: 1, justifyContent: "center" }, onClick: onFechar
-              }, "Cancelar")))));
+                className: "btn", style: { flex: 1, justifyContent: "center" },
+                onClick: () => setModo("aviso")
+              }, "Voltar")))));
 }
 
 /* ============ LINHA DE ETAPA NO EDITOR ============ */
 function EtapaEditorRow({ et, i, total, onPatch, onMove, onDel }) {
-  const rec = recorrenciaDe(et);
-  const dias = et.dias || [];
-  const toggleDia = d => onPatch({ dias: dias.indexOf(d) !== -1 ? dias.filter(x => x !== d) : [...dias, d].sort() });
-
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 8,
-      paddingBottom: rec ? 8 : 0,
-      borderBottom: rec ? "1px dashed var(--border)" : "none"
-    }
-  },
-    /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 6 } },
-      /*#__PURE__*/React.createElement("span", { className: "row", style: { gap: 1, flex: "none" } },
-        /*#__PURE__*/React.createElement("span", {
-          onClick: () => i > 0 && onMove(-1), title: "Subir",
-          style: { cursor: i > 0 ? "pointer" : "default", color: i > 0 ? "var(--text-3)" : "var(--border-strong)", fontSize: 11, lineHeight: 1 }
-        }, "\u25B2"),
-        /*#__PURE__*/React.createElement("span", {
-          onClick: () => i < total - 1 && onMove(1), title: "Descer",
-          style: { cursor: i < total - 1 ? "pointer" : "default", color: i < total - 1 ? "var(--text-3)" : "var(--border-strong)", fontSize: 11, lineHeight: 1 }
-        }, "\u25BC")),
-      /*#__PURE__*/React.createElement("span", { style: { color: "var(--text-3)", fontSize: 12, width: 16 } }, i + 1, "."),
-      /*#__PURE__*/React.createElement("input", {
-        value: et.texto,
-        onChange: e => onPatch({ texto: e.target.value }),
-        placeholder: "Etapa " + (i + 1)
-      }),
-      /*#__PURE__*/React.createElement("input", {
-        type: "number", min: "1", max: "20", value: et.meta,
-        onChange: e => onPatch({ meta: e.target.value }),
-        style: { width: 46, textAlign: "center", padding: "9px 3px" }
-      }),
+  return /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 6, marginBottom: 6 } },
+    /*#__PURE__*/React.createElement("span", { className: "row", style: { gap: 1, flex: "none" } },
       /*#__PURE__*/React.createElement("span", {
-        onClick: onDel,
-        style: { cursor: "pointer", color: "var(--text-3)", padding: "0 2px", width: 18 }
-      }, "\u2715")),
+        onClick: () => i > 0 && onMove(-1), title: "Subir",
+        style: { cursor: i > 0 ? "pointer" : "default", color: i > 0 ? "var(--text-3)" : "var(--border-strong)", fontSize: 11, lineHeight: 1 }
+      }, "\u25B2"),
+      /*#__PURE__*/React.createElement("span", {
+        onClick: () => i < total - 1 && onMove(1), title: "Descer",
+        style: { cursor: i < total - 1 ? "pointer" : "default", color: i < total - 1 ? "var(--text-3)" : "var(--border-strong)", fontSize: 11, lineHeight: 1 }
+      }, "\u25BC")),
+    /*#__PURE__*/React.createElement("span", {
+      style: { color: et.concluida ? "var(--done)" : "var(--text-3)", fontSize: 12, width: 16 }
+    }, et.concluida ? "\u2713" : (i + 1) + "."),
+    /*#__PURE__*/React.createElement("input", {
+      value: et.texto,
+      onChange: e => onPatch({ texto: e.target.value }),
+      placeholder: "Etapa " + (i + 1),
+      style: et.concluida ? { opacity: .6 } : {}
+    }),
+    /*#__PURE__*/React.createElement("input", {
+      type: "number", min: "1", max: "20", value: et.meta,
+      onChange: e => onPatch({ meta: e.target.value }),
+      style: { width: 52, textAlign: "center", padding: "9px 4px" }
+    }),
+    /*#__PURE__*/React.createElement("span", {
+      onClick: onDel,
+      style: { cursor: "pointer", color: "var(--text-3)", padding: "0 2px", width: 18 }
+    }, "\u2715"));
+}
 
-    // seletor de recorrência
-    /*#__PURE__*/React.createElement("div", {
-      className: "row", style: { gap: 5, marginTop: 5, marginLeft: 40, flexWrap: "wrap" }
-    }, RECORRENCIAS.map(r => /*#__PURE__*/React.createElement("span", {
-      key: r.id || "none",
-      onClick: () => onPatch({ recorrencia: r.id, semanal: r.id === "semanal" }),
-      title: r.nome,
-      style: {
-        cursor: "pointer", fontSize: 10.5, padding: "3px 8px", borderRadius: 7,
-        background: rec === r.id ? "var(--lime-soft)" : "transparent",
-        border: "1px solid " + (rec === r.id ? "var(--lime)" : "var(--border-strong)"),
-        color: rec === r.id ? "var(--lime)" : "var(--text-3)"
-      }
-    }, r.id ? r.icone + " " + r.nome : "\u2014 sem repetir"))),
+/* ============ SELETOR DE RECORRENCIA DO PROJETO ============ */
+function RecorrenciaProjeto({ rec, dias, diaMes, onChange }) {
+  const ds = dias || [];
+  const toggle = d => onChange({ dias: ds.indexOf(d) !== -1 ? ds.filter(x => x !== d) : [...ds, d].sort((a,b)=>a-b) });
+  return /*#__PURE__*/React.createElement("div", { style: { marginBottom: 16 } },
+    /*#__PURE__*/React.createElement("label", null, "Recorr\u00EAncia \u2014 quando este projeto aparece nos check-ins"),
+    /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 6, flexWrap: "wrap" } },
+      RECORRENCIAS.map(r => /*#__PURE__*/React.createElement("span", {
+        key: r.id || "none",
+        onClick: () => onChange({ recorrencia: r.id }),
+        style: {
+          cursor: "pointer", fontSize: 11.5, padding: "6px 11px", borderRadius: 8,
+          background: rec === r.id ? "var(--lime-soft)" : "var(--bg-elev2)",
+          border: "1px solid " + (rec === r.id ? "var(--lime)" : "var(--border-strong)"),
+          color: rec === r.id ? "var(--lime)" : "var(--text-2)"
+        }
+      }, r.id ? r.icone + " " + r.nome : "\u2014 sem repetir"))),
 
-    // dias da semana
-    rec === "semanal" && /*#__PURE__*/React.createElement("div", { style: { marginTop: 6, marginLeft: 40 } },
-      /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 4 } },
+    rec === "semanal" && /*#__PURE__*/React.createElement("div", { style: { marginTop: 9 } },
+      /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 5 } },
         DIAS_MINI.map((d, k) => /*#__PURE__*/React.createElement("span", {
           key: k,
-          onClick: () => toggleDia(k),
+          onClick: () => toggle(k),
           title: DIAS_CURTO[k],
           style: {
-            cursor: "pointer", width: 26, height: 26, borderRadius: "50%",
+            cursor: "pointer", width: 30, height: 30, borderRadius: "50%",
             display: "inline-flex", alignItems: "center", justifyContent: "center",
-            fontSize: 10.5, fontWeight: 600,
-            background: dias.indexOf(k) !== -1 ? "var(--lime)" : "transparent",
-            border: "1px solid " + (dias.indexOf(k) !== -1 ? "var(--lime)" : "var(--border-strong)"),
-            color: dias.indexOf(k) !== -1 ? "#0b0f0c" : "var(--text-3)"
+            fontSize: 11.5, fontWeight: 600,
+            background: ds.indexOf(k) !== -1 ? "var(--lime)" : "transparent",
+            border: "1px solid " + (ds.indexOf(k) !== -1 ? "var(--lime)" : "var(--border-strong)"),
+            color: ds.indexOf(k) !== -1 ? "#0b0f0c" : "var(--text-3)"
           }
         }, d))),
-      /*#__PURE__*/React.createElement("div", { style: { fontSize: 9.5, color: "var(--text-3)", marginTop: 4 } },
-        dias.length ? "aparece nos dias marcados" : "sem dia fixo \u2014 aparece a semana toda at\u00E9 completar")),
+      /*#__PURE__*/React.createElement("div", { style: { fontSize: 10.5, color: "var(--text-3)", marginTop: 5 } },
+        ds.length ? "aparece nos dias marcados" : "sem dia fixo \u2014 aparece a semana toda")),
 
-    // dia do mês
     rec === "mensal" && /*#__PURE__*/React.createElement("div", {
-      className: "row", style: { marginTop: 6, marginLeft: 40, gap: 7, alignItems: "center" }
+      className: "row", style: { marginTop: 9, gap: 8, alignItems: "center" }
     },
-      /*#__PURE__*/React.createElement("span", { style: { fontSize: 10.5, color: "var(--text-3)", flex: "none" } }, "dia do m\u00EAs:"),
+      /*#__PURE__*/React.createElement("span", { style: { fontSize: 11.5, color: "var(--text-3)", flex: "none" } }, "dia do m\u00EAs:"),
       /*#__PURE__*/React.createElement("input", {
-        type: "number", min: "0", max: "31", value: et.diaMes || "",
+        type: "number", min: "0", max: "31", value: diaMes || "",
         placeholder: "livre",
-        onChange: e => onPatch({ diaMes: e.target.value }),
-        style: { width: 64, textAlign: "center", padding: "6px 4px", fontSize: 12 }
+        onChange: e => onChange({ diaMes: e.target.value }),
+        style: { width: 70, textAlign: "center", padding: "7px 4px", fontSize: 12.5 }
       }),
-      /*#__PURE__*/React.createElement("span", { style: { fontSize: 9.5, color: "var(--text-3)" } },
-        "em branco = qualquer dia do m\u00EAs")));
+      /*#__PURE__*/React.createElement("span", { style: { fontSize: 10.5, color: "var(--text-3)" } },
+        "em branco = qualquer dia")));
 }
 
 function CalendarioView({ projetos, log }) {
@@ -2799,20 +2719,25 @@ function EditorModal({
   const [novoNome, setNovoNome] = useState("");
   const [novoEmoji, setNovoEmoji] = useState("📌");
   const [rotinaFreq, setRotinaFreq] = useState(editing.rotinaFreq || "Diaria");
+  const [rec, setRec] = useState(isNew ? "" : recorrenciaDe(editing));
+  const [dias, setDias] = useState(isNew ? [] : (editing.dias || []));
+  const [diaMes, setDiaMes] = useState(isNew ? 0 : Number(editing.diaMes || 0));
+  const patchRec = patch => {
+    if ("recorrencia" in patch) setRec(patch.recorrencia);
+    if ("dias" in patch) setDias(patch.dias);
+    if ("diaMes" in patch) setDiaMes(patch.diaMes);
+  };
   const [etapas, setEtapas] = useState(isNew ? [{
     texto: "",
     meta: DEFAULT_META,
     id: uid()
   }] : editing.etapas.map(e => ({
     texto: e.texto,
-    semanal: !!e.semanal,
-    recorrencia: recorrenciaDe(e),
-    dias: e.dias || [],
-    diaMes: Number(e.diaMes || 0),
     meta: e.meta || DEFAULT_META,
     id: e.id,
     passadas: e.passadas || 0,
-    concluida: e.concluida
+    concluida: e.concluida,
+    concluidaEm: e.concluidaEm || ""
   })));
 
   // emoji resultante: se criando nova, usa o escolhido; senão o da categoria selecionada
@@ -2835,23 +2760,23 @@ function EditorModal({
       emoji,
       tipo: editing.tipo,
       rotinaFreq,
+      recorrencia: isRotina ? "" : rec,
+      dias: rec === "semanal" ? dias : [],
+      diaMes: rec === "mensal" ? Math.max(0, Math.min(31, parseInt(diaMes) || 0)) : 0,
       favorito: !isNew ? editing.favorito : false,
       ultimoAvanco: !isNew ? editing.ultimoAvanco : "",
       etapas: etapasClean.map((et, i) => {
         const meta = Math.max(1, parseInt(et.meta) || 1);
         const passadas = Math.min(et.passadas || 0, meta);
-        const rec = recorrenciaDe(et);
+        const fechada = passadas >= meta;
         return {
           id: et.id || uid(),
           texto: et.texto.trim(),
-          semanal: rec === "semanal",
-          recorrencia: rec,
-          dias: rec === "semanal" ? (et.dias || []) : [],
-          diaMes: rec === "mensal" ? Math.max(0, Math.min(31, parseInt(et.diaMes) || 0)) : 0,
           ordem: i,
           meta,
           passadas,
-          concluida: passadas >= meta
+          concluida: fechada,
+          concluidaEm: fechada ? (et.concluidaEm || todayISO()) : ""
         };
       })
     };
@@ -2986,11 +2911,16 @@ function EditorModal({
     value: "Diaria"
   }, "Diária (reseta todo dia)"), /*#__PURE__*/React.createElement("option", {
     value: "Semanal"
-  }, "Semanal (reseta domingo)"))), !isRotina && /*#__PURE__*/React.createElement("div", {
+  }, "Semanal (reseta domingo)"))), !isRotina && /*#__PURE__*/React.createElement(RecorrenciaProjeto, {
+    rec: rec,
+    dias: dias,
+    diaMes: diaMes,
+    onChange: patchRec
+  }), !isRotina && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 16
     }
-  }, /*#__PURE__*/React.createElement("label", null, "Etapas — texto, nº de passadas e recorrência"), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("label", null, "Etapas da trilha — texto e nº de passadas"), /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
       gap: 6,
@@ -3036,9 +2966,9 @@ function EditorModal({
     onClick: () => setEtapas([...etapas, {
       texto: "",
       meta: DEFAULT_META,
-      recorrencia: "",
-      dias: [],
-      diaMes: 0,
+      passadas: 0,
+      concluida: false,
+      concluidaEm: "",
       id: uid()
     }])
   }, "+ etapa")), /*#__PURE__*/React.createElement("div", {
