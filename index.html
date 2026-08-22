@@ -542,6 +542,26 @@ function previstoNoDia(p, iso) {
 // primeira etapa nao concluida = "voce esta aqui"
 const etapaVigente = p => (p.etapas || []).find(e => !e.concluida) || null;
 
+/* Projetos que estavam previstos NESTA SEMANA e ficaram sem registro.
+   Fecha na segunda-feira: semana nova, lista limpa.
+   Ignora quem ja esta na lista de hoje (evita linha duplicada). */
+function resgateDaSemana(projetos, log, hoje) {
+  const inicio = chaveSemanaISO(hoje);
+  const out = [];
+  (projetos || []).forEach(p => {
+    if (!ehRecorrente(p)) return;
+    if (previstoNoDia(p, hoje)) return;
+    if (feitoNoDia(log, p.projeto, hoje) > 0) return;
+    const faltou = [];
+    for (let d = inicio; d < hoje; d = somaDias(d, 1)) {
+      if (previstoNoDia(p, d) && feitoNoDia(log, p.projeto, d) === 0) faltou.push(d);
+    }
+    if (faltou.length) out.push({ p: p, faltou: faltou });
+  });
+  return out;
+}
+const LS_ADIADO = "life_resgate_adiado";
+
 // quantos check-ins o projeto teve neste dia
 const feitoNoDia = (log, projeto, iso) => (log || []).filter(ev =>
   ev.projeto === projeto && String(ev.data).slice(0,10) === iso).length;
@@ -1990,6 +2010,16 @@ function LineChart({
 function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckinRotina, onEdit }) {
   const hoje = todayISO();
   const [diaSel, setDiaSel] = useState(hoje);
+  const [adiado, setAdiado] = useState(() => {
+    try { return localStorage.getItem(LS_ADIADO) === hoje; } catch (e) { return false; }
+  });
+  const adiar = v => {
+    setAdiado(v);
+    try { v ? localStorage.setItem(LS_ADIADO, hoje) : localStorage.removeItem(LS_ADIADO); } catch (e) {}
+  };
+  const resgate = useMemo(
+    () => diaSel === hoje ? resgateDaSemana(projetos, log, hoje) : [],
+    [projetos, log, diaSel, hoje]);
   const inicio = chaveSemanaISO(diaSel);
   const dias = Array.from({ length: 7 }, (_, i) => somaDias(inicio, i));
 
@@ -2120,6 +2150,71 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
       }, /*#__PURE__*/React.createElement("div", {
         style: { width: pct + "%", height: "100%", background: "var(--lime)", transition: ".3s" }
       }))),
+
+    // ---- ficaram para tras nesta semana ----
+    resgate.length > 0 && (adiado
+      ? /*#__PURE__*/React.createElement("div", {
+          onClick: () => adiar(false),
+          className: "row",
+          style: {
+            gap: 7, cursor: "pointer", marginBottom: 12, padding: "7px 11px",
+            borderRadius: 9, background: "var(--bg-elev2)",
+            border: "1px solid var(--border)", fontSize: 11.5, color: "var(--text-3)"
+          }
+        }, "\u23F0 " + resgate.length + " ficaram para tr\u00E1s nesta semana",
+          /*#__PURE__*/React.createElement("span", { style: { marginLeft: "auto" } }, "\u203A"))
+      : /*#__PURE__*/React.createElement("div", {
+          style: {
+            marginBottom: 16, padding: "12px 13px", borderRadius: 12,
+            background: "var(--bg-elev2)", border: "1px solid var(--border-strong)"
+          }
+        },
+        /*#__PURE__*/React.createElement("div", {
+          className: "row", style: { justifyContent: "space-between", marginBottom: 9 }
+        },
+          /*#__PURE__*/React.createElement("span", {
+            style: { fontSize: 11.5, fontWeight: 600, color: "var(--text-2)" }
+          }, "\u23F0 Ficaram para tr\u00E1s nesta semana"),
+          /*#__PURE__*/React.createElement("span", {
+            onClick: () => adiar(true),
+            style: { cursor: "pointer", fontSize: 11, color: "var(--text-3)" }
+          }, "deixar pra depois")),
+
+        resgate.map(({ p, faltou }) => {
+          const et = etapaVigente(p);
+          const quando = faltou.map(d => DIAS_CURTO[idxDia(d)]).join(", ");
+          return /*#__PURE__*/React.createElement("div", {
+            key: "rg-" + p.projId,
+            className: "row",
+            style: {
+              gap: 10, alignItems: "center", padding: "9px 0",
+              borderTop: "1px solid var(--border)"
+            }
+          },
+            /*#__PURE__*/React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+              /*#__PURE__*/React.createElement("div", {
+                style: {
+                  fontSize: 11, color: "var(--text-3)",
+                  whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
+                }
+              }, (p.emoji || "\uD83D\uDCCC") + " " + p.projeto + " \u00B7 faltou " + quando),
+              /*#__PURE__*/React.createElement("div", {
+                style: {
+                  fontSize: 13, fontWeight: 600, marginTop: 2,
+                  color: et ? "var(--text)" : "var(--warn)",
+                  whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
+                }
+              }, et ? et.texto : "sem pr\u00F3xima etapa")),
+            /*#__PURE__*/React.createElement("button", {
+              className: "btn btn-sm",
+              style: { flex: "none", borderColor: "var(--lime-dim)", color: "var(--lime)" },
+              onClick: () => et ? onCheckin(p, hoje) : onEdit(p)
+            }, et ? "passar pra hoje" : "definir"));
+        }),
+
+        /*#__PURE__*/React.createElement("div", {
+          style: { fontSize: 10, color: "var(--text-3)", marginTop: 9, lineHeight: 1.5 }
+        }, "registra o check-in com a data de hoje \u00B7 a lista zera toda segunda"))),
 
     diaSel > hoje && /*#__PURE__*/React.createElement("div", {
       style: {
