@@ -417,6 +417,16 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 // data local (nao UTC) — evita o pulo de dia depois das 21h no fuso do Brasil
 const isoLocal = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 const todayISO = () => isoLocal(new Date());
+/* O Sheets converte "2026-08-04" em objeto Date e devolve
+   "Tue Aug 04 2026 00:00:00 GMT-0300". Isso quebra qualquer comparacao
+   de string entre datas. normISO traz tudo de volta para yyyy-mm-dd. */
+const normISO = v => {
+  if (!v) return "";
+  const t = String(v);
+  if (/^\d{4}-\d{2}-\d{2}/.test(t)) return t.slice(0, 10);
+  const d = new Date(t);
+  return isNaN(d.getTime()) ? "" : isoLocal(d);
+};
 const isoWeek = d => {
   const dt = new Date(d);
   dt.setHours(0, 0, 0, 0);
@@ -425,9 +435,11 @@ const isoWeek = d => {
   return dt.getFullYear() + "-" + (1 + Math.round(((dt - wk1) / 86400000 - 3 + (wk1.getDay() + 6) % 7) / 7));
 };
 const daysSince = iso => {
-  if (!iso) return null;
-  const diff = Date.now() - new Date(iso).getTime();
-  return Math.floor(diff / 86400000);
+  const d = normISO(iso);
+  if (!d) return null;
+  // diferenca em dias de calendario locais (nao em horas corridas UTC)
+  const a = new Date(d + "T00:00:00"), b = new Date(todayISO() + "T00:00:00");
+  return Math.round((b - a) / 86400000);
 };
 // Progresso por passadas: soma passadas feitas / soma das metas
 const progressoPassadas = etapas => {
@@ -583,6 +595,8 @@ function arquivarConcluidas(projects, log) {
 
 /* Migracao: versoes antigas guardavam recorrencia por etapa e nao tinham
    data de conclusao. Sobe a recorrencia pro projeto e deduz a data pelo Log. */
+const normalizarLog = log => (log || []).map(ev => ({ ...ev, data: normISO(ev.data) })).filter(ev => ev.data);
+
 function migrarProjetos(projects, log) {
   const ultimo = {};
   (log || []).forEach(ev => {
@@ -591,6 +605,7 @@ function migrarProjetos(projects, log) {
   });
   return (projects || []).map(p => {
     const np = { ...p };
+    np.ultimoAvanco = normISO(p.ultimoAvanco);
     if (!recorrenciaDe(np)) {
       const fonte = (p.etapas || []).find(e => ehRecorrente(e));
       if (fonte) {
@@ -604,6 +619,7 @@ function migrarProjetos(projects, log) {
     np.etapas = (p.etapas || []).map(e => {
       const ne = { ...e };
       delete ne.recorrencia; delete ne.dias; delete ne.diaMes; delete ne.semanal;
+      ne.concluidaEm = normISO(ne.concluidaEm);
       if (ne.concluida && !ne.concluidaEm) {
         ne.concluidaEm = ultimo[p.projeto + "|" + e.texto] || p.ultimoAvanco || todayISO();
       }
@@ -628,7 +644,7 @@ function rowsToProjects(rows) {
         tipo: r.tipo || "Projeto",
         rotinaFreq: r.rotinaFreq || "Diaria",
         favorito: !!r.favorito,
-        ultimoAvanco: r.ultimoAvanco || "",
+        ultimoAvanco: normISO(r.ultimoAvanco),
         escola: r.escola || "",
         recorrencia: "",
         dias: [],
@@ -654,7 +670,7 @@ function rowsToProjects(rows) {
         meta: r.meta || DEFAULT_META,
         passadas: r.passadas || 0,
         concluida: !!r.concluida,
-        concluidaEm: r.concluidaEm ? String(r.concluidaEm).slice(0, 10) : ""
+        concluidaEm: normISO(r.concluidaEm)
       });
     }
   });
@@ -753,7 +769,7 @@ function App() {
     if (raw) {
       try {
         const data = JSON.parse(raw);
-        const logSalvo = data.log || [];
+        const logSalvo = normalizarLog(data.log);
         const migrados = migrarProjetos(data.projects || [], logSalvo);
         setProjects(arquivarConcluidas(resetRotinas(migrados), logSalvo));
         setLog(logSalvo);
@@ -949,7 +965,8 @@ function resetRotinas(list) {
       if (p !== target) return p;
       const etapas = [...p.etapas];
       etapas[next] = { ...alvo, passadas, concluida: fechou, concluidaEm: fechou ? dia : "" };
-      return { ...p, etapas, ultimoAvanco: dia > (p.ultimoAvanco || "") ? dia : p.ultimoAvanco };
+      const ant = normISO(p.ultimoAvanco);
+      return { ...p, etapas, ultimoAvanco: dia > ant ? dia : ant };
     }));
     setLog(prev => [...prev, {
       data: dia,
@@ -1106,7 +1123,7 @@ function resetRotinas(list) {
         action: "getLog"
       });
       if (r.ok) {
-        const logNuvem = (rl.ok && rl.log) ? rl.log : [];
+        const logNuvem = (rl.ok && rl.log) ? normalizarLog(rl.log) : [];
         const migrados2 = migrarProjetos(rowsToProjects(r.rows), logNuvem);
         setProjects(arquivarConcluidas(resetRotinas(migrados2), logNuvem));
         if (rl.ok) setLog(logNuvem);
