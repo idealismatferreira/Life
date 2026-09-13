@@ -611,11 +611,12 @@ const ECON = {
   multPorDia: 0.1,       // sem recorrência: por dia parado além da carência
   carenciaDias: 3,
   janelaDias: 60,        // quanto para trás o multiplicador olha
-  precoMin: 1,           // 💎 por minuto de jogo
+  precoMin: 1.5,         // 💎 por minuto de jogo (arredonda pra cima por compra)
   pacotes: [15, 30, 60],
   emergenciaMin: 30,     // 1x por semana; pode deixar o saldo negativo
   pausaMaxDias: 7
 };
+const precoJogo = minutos => Math.ceil(minutos * ECON.precoMin);
 const esforcoDe = p => p.tipo === "Rotina" ? ESFORCOS[0] : (ESFORCOS.find(e => e.id === p.esforco) || ESFORCOS[1]);
 const emPausa = (pausas, iso) => (pausas || []).some(pa => iso >= pa.inicio && iso <= pa.fim);
 const dataLocalDe = isoDataHora => isoLocal(new Date(isoDataHora));
@@ -1213,7 +1214,22 @@ function resetRotinas(list) {
     }));
   }
 
+  // desmarca uma etapa (ou tira uma passada dela) — estorna o evento mais
+  // recente dessa etapa no Log, junto com as 💎 e o bônus que ele pagou
   function toggleEtapa(target, etapaId) {
+    const alvo = target.etapas.find(e => e.id === etapaId);
+    if (!alvo) return;
+    let novoLog = log;
+    if (alvo.concluida || (alvo.passadas || 0) > 0) {
+      const rev = [...log].reverse().findIndex(ev => ev.projeto === target.projeto && ev.etapa === alvo.texto);
+      if (rev !== -1) {
+        const real = log.length - 1 - rev;
+        novoLog = log.filter((_, j) => j !== real);
+        setLog(novoLog);
+      }
+    }
+    const eventosProj = novoLog.filter(ev => ev.projeto === target.projeto);
+    const novaData = eventosProj.length ? eventosProj.map(ev => ev.data).sort().slice(-1)[0] : "";
     setProjects(prev => prev.map(p => {
       if (p !== target) return p;
       const etapas = p.etapas.map(e => {
@@ -1235,7 +1251,8 @@ function resetRotinas(list) {
       });
       return {
         ...p,
-        etapas
+        etapas,
+        ultimoAvanco: novaData
       };
     }));
   }
@@ -1255,7 +1272,7 @@ function resetRotinas(list) {
   /* ---- CARTEIRA ---- */
   // compra minutos de jogo; se já houver desbloqueio, emenda no fim dele
   function comprarJogo(minutos, emergencia) {
-    const custo = emergencia ? ECON.emergenciaMin * ECON.precoMin : minutos * ECON.precoMin;
+    const custo = precoJogo(emergencia ? ECON.emergenciaMin : minutos);
     if (emergencia ? emergenciaNaSemana(carteira, todayISO()) : saldo < custo) return;
     const mins = emergencia ? ECON.emergenciaMin : minutos;
     const inicioMs = liberadoAte(carteira) || Date.now();
@@ -2759,7 +2776,7 @@ function CarteiraModal({ log, carteira, saldo, liberado, agora, onComprar, onEme
       secao(liberado ? "Emendar mais tempo de jogo" : "Comprar tempo de jogo"),
       /*#__PURE__*/React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 } },
         ECON.pacotes.map(min => {
-          const custo = min * ECON.precoMin, pode = saldo >= custo;
+          const custo = precoJogo(min), pode = saldo >= custo;
           return /*#__PURE__*/React.createElement("button", {
             key: min,
             className: "btn" + (pode ? " btn-primary" : ""),
@@ -2772,7 +2789,7 @@ function CarteiraModal({ log, carteira, saldo, liberado, agora, onComprar, onEme
       /*#__PURE__*/React.createElement("button", {
         className: "btn",
         disabled: emergUsada,
-        onClick: () => { if (!emergUsada && confirm("Usar a emergência da semana? São " + ECON.emergenciaMin + " min que viram dívida de " + ECON.emergenciaMin * ECON.precoMin + " 💎.")) onEmergencia(); },
+        onClick: () => { if (!emergUsada && confirm("Usar a emergência da semana? São " + ECON.emergenciaMin + " min que viram dívida de " + precoJogo(ECON.emergenciaMin) + " 💎.")) onEmergencia(); },
         style: { width: "100%", justifyContent: "center", marginTop: 8, opacity: emergUsada ? .45 : 1, cursor: emergUsada ? "default" : "pointer" }
       }, emergUsada ? "🆘 emergência já usada nesta semana" : "🆘 Emergência · " + ECON.emergenciaMin + " min (vira dívida)"),
 
