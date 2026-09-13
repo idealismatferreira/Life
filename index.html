@@ -625,8 +625,9 @@ const ECON = {
   multPorFalta: 0.25,    // recorrentes: por dia previsto que ficou sem check-in
   multPorDia: 0.1,       // sem recorrência: por dia parado além da carência
   carenciaDias: 3,
+  bonusMinPassadas: 3,   // etapa precisa ter pelo menos 3 passadas para dar bônus
   janelaDias: 60,        // quanto para trás o multiplicador olha
-  precoMin: 1.5,         // 💎 por minuto de jogo (arredonda pra cima por compra)
+  precoMin: 2.25,        // 💎 por minuto de jogo (arredonda pra cima por compra)
   pacotes: [15, 30, 60],
   emergenciaMin: 30,     // 1x por semana; pode deixar o saldo negativo
   pausaMaxDias: 7
@@ -1127,7 +1128,7 @@ function resetRotinas(list) {
     }));
     const cot = cotar(target, dia);
     // bônus de etapa: 1x a base, fora do teto diário, mas respeita a carteira máxima
-    const bonus = fechou ? Math.max(0, Math.min(esforcoDe(target).gemas,
+    const bonus = fechou && meta >= ECON.bonusMinPassadas ? Math.max(0, Math.min(esforcoDe(target).gemas,
       ECON.carteiraMax - (saldo + cot.gemas))) : 0;
     setLog(prev => [...prev, {
       data: dia,
