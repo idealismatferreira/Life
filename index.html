@@ -58,6 +58,21 @@
   .fade{animation:fade .25s ease;}
   @keyframes fade{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
   @keyframes pulse-dot{0%{transform:scale(1);}40%{transform:scale(1.5);}100%{transform:scale(1);}}
+  @keyframes overlay-in{from{opacity:0;}to{opacity:1;}}
+  @keyframes pop-in{from{opacity:0;transform:scale(.92);}to{opacity:1;transform:scale(1);}}
+  @keyframes pulse-warn{0%{box-shadow:0 0 0 0 #e0b75599;}70%{box-shadow:0 0 0 22px #e0b75500;}100%{box-shadow:0 0 0 0 #e0b75500;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .pull-overlay{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.6);display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:16px;padding:16px;animation:overlay-in .25s ease;backdrop-filter:blur(2px);}
+  .pull-btn{font-family:inherit;font-size:19px;font-weight:700;letter-spacing:-.01em;color:#0b0f0c;background:var(--warn);
+    border:0;border-radius:18px;padding:22px 42px;cursor:pointer;display:inline-flex;align-items:center;gap:12px;
+    animation:pop-in .3s ease, pulse-warn 2s ease-out .3s infinite;transition:transform .15s, background .15s;}
+  .pull-btn:hover{background:#ebc56a;transform:translateY(-1px);}
+  .pull-btn:active{transform:scale(.97);}
+  .pull-btn:focus{outline:none;}
+  .pull-btn:focus-visible{outline:2px solid #e8f0e6;outline-offset:4px;}
+  .pull-btn[disabled]{cursor:default;animation:none;opacity:.9;}
+  .pull-spin{width:18px;height:18px;border-radius:50%;border:2.5px solid #0b0f0c40;border-top-color:#0b0f0c;animation:spin .7s linear infinite;}
   .dot{display:inline-block;width:9px;height:9px;border-radius:50%;transition:.15s;}
   .dot-on{background:var(--lime);animation:pulse-dot .35s ease;}
   .dot-off{background:transparent;border:1.5px solid var(--lime-dim);box-sizing:border-box;}
@@ -866,7 +881,8 @@ function App() {
   const [loaded, setLoaded] = useState(false);
   const [syncState, setSyncState] = useState("idle"); // status do PULL manual: idle|saving|ok|err|noapi
   const [autoState, setAutoState] = useState("idle"); // status do auto-push: idle|saving|ok|err
-  const [pullReminder, setPullReminder] = useState(true); // aviso "puxe antes de mexer" ao abrir
+  const [pullReminder, setPullReminder] = useState(true); // overlay "puxar" ao abrir; some depois de puxar
+  const [falhouPull, setFalhouPull] = useState(false); // habilita "continuar offline" no overlay
   const [editing, setEditing] = useState(null); // projeto em edição ou "new"
   const [view, setView] = useState("home"); // home | checkins | progresso | calendario
   const [aviso, setAviso] = useState(null); // {projId, projeto, etapa} -> modal "etapa concluida"
@@ -1315,10 +1331,11 @@ function resetRotinas(list) {
     setProjects(prev => prev.filter(p => !(ref.projId && p.projId === ref.projId || p === ref)));
     setEditing(null);
   }
-  async function pull() {
-    // Confirmação: puxar sobrescreve o que está neste dispositivo
+  async function pull(semConfirmar) {
+    // Confirmação: puxar sobrescreve o que está neste dispositivo.
+    // O overlay de abertura pula a pergunta — ali puxar é justamente o que se quer.
     const temLocal = projects.length > 0;
-    if (temLocal && !confirm("Puxar do Sheets vai substituir os projetos deste dispositivo pela versão da nuvem. As mudanças recentes deste aparelho já sincronizaram? Continuar?")) return;
+    if (!semConfirmar && temLocal && !confirm("Puxar do Sheets vai substituir os projetos deste dispositivo pela versão da nuvem. As mudanças recentes deste aparelho já sincronizaram? Continuar?")) return;
     setSyncState("saving");
     try {
       const r = await apiCall({
@@ -1342,6 +1359,7 @@ function resetRotinas(list) {
         setTimeout(() => setSyncState("idle"), 2000);
       } else throw new Error(r.error);
     } catch (e) {
+      setFalhouPull(true);
       setSyncState(e.message === "no-api" ? "noapi" : "err");
       setTimeout(() => setSyncState("idle"), 3500);
     }
@@ -1352,7 +1370,7 @@ function resetRotinas(list) {
   }, /*#__PURE__*/React.createElement(Header, {
     autoState: autoState,
     pullState: syncState,
-    onPull: pull,
+    onPull: () => pull(false),
     hasApi: !!API_URL,
     view: view,
     setView: setView,
@@ -1476,7 +1494,12 @@ function resetRotinas(list) {
       padding: "9px 16px", borderRadius: 20, fontSize: 13, fontWeight: 600,
       maxWidth: "calc(100% - 32px)", textAlign: "center", boxShadow: "0 6px 20px #0008"
     }
-  }, toast.txt), editing && /*#__PURE__*/React.createElement(EditorModal, {
+  }, toast.txt), API_URL && pullReminder && /*#__PURE__*/React.createElement(PullOverlay, {
+    estado: syncState,
+    falhou: falhouPull,
+    onPull: () => pull(true),
+    onOffline: () => setPullReminder(false)
+  }), editing && /*#__PURE__*/React.createElement(EditorModal, {
     editing: editing,
     categorias: categoriasDisponiveis,
     onClose: () => setEditing(null),
@@ -1588,19 +1611,7 @@ function Header({
     }
   }, "💎 " + saldo, liberado && /*#__PURE__*/React.createElement("span", {
     style: { color: "var(--lime)", fontWeight: 500 }
-  }, "· 🎮 " + Math.max(1, Math.ceil((liberado - agora) / 60000)) + "m")), hasApi && pullReminder && /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 12,
-      fontWeight: 600,
-      color: "#0b0f0c",
-      background: "var(--warn)",
-      padding: "6px 10px",
-      borderRadius: 8,
-      lineHeight: 1.2,
-      maxWidth: 150,
-      textAlign: "right"
-    }
-  }, "⚠️ Puxe antes de mexer"), hasApi && /*#__PURE__*/React.createElement("button", {
+  }, "· 🎮 " + Math.max(1, Math.ceil((liberado - agora) / 60000)) + "m")), hasApi && /*#__PURE__*/React.createElement("button", {
     className: "btn btn-sm",
     onClick: onPull,
     style: pullState === "ok" ? {
@@ -2707,6 +2718,32 @@ function RecorrenciaProjeto({ rec, dias, diaMes, onChange }) {
       }),
       /*#__PURE__*/React.createElement("span", { style: { fontSize: 10.5, color: "var(--text-3)" } },
         "em branco = qualquer dia")));
+}
+
+/* ============ OVERLAY DE ABERTURA: PUXAR DA NUVEM ============
+   Bloqueia a dashboard até puxar, para nunca mexer numa versão velha
+   e sobrescrever a planilha. Some sozinho quando o pull termina. */
+function PullOverlay({ estado, falhou, onPull, onOffline }) {
+  const puxando = estado === "saving";
+  const erro = estado === "err" || estado === "noapi";
+  return /*#__PURE__*/React.createElement("div", { className: "pull-overlay" },
+    /*#__PURE__*/React.createElement("button", {
+      className: "pull-btn",
+      disabled: puxando,
+      autoFocus: true,
+      onClick: () => { if (!puxando) onPull(); }
+    }, puxando
+      ? [/*#__PURE__*/React.createElement("span", { key: "s", className: "pull-spin" }), "Puxando…"]
+      : "↓ Puxar da nuvem"),
+    /*#__PURE__*/React.createElement("div", {
+      style: { fontSize: 13, color: erro ? "var(--danger)" : "#e8f0e6cc", textAlign: "center", maxWidth: 300, lineHeight: 1.45 }
+    }, erro
+      ? "Não deu para puxar. Confira a conexão e tente de novo."
+      : "Traz a versão mais recente antes de você mexer em qualquer coisa."),
+    falhou && !puxando && /*#__PURE__*/React.createElement("span", {
+      onClick: onOffline,
+      style: { fontSize: 12, color: "#e8f0e699", cursor: "pointer", textDecoration: "underline", marginTop: 4 }
+    }, "continuar offline (sem puxar)"));
 }
 
 /* ============ CARTEIRA + LOJA DE JOGOS ============ */
