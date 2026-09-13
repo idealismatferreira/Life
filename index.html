@@ -36,7 +36,12 @@
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
   html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:'Sora',system-ui,sans-serif;}
-  body{padding-bottom:40px;}
+  body{padding-bottom:96px;}
+  .fab-agendar{position:fixed;right:18px;bottom:22px;z-index:45;width:56px;height:56px;border-radius:50%;border:0;
+    background:var(--lime);color:#0b0f0c;font-size:30px;font-weight:600;line-height:1;cursor:pointer;
+    box-shadow:0 8px 24px #0009;display:flex;align-items:center;justify-content:center;transition:transform .15s,background .15s;}
+  .fab-agendar:hover{background:var(--lime-dim);transform:translateY(-2px);}
+  .fab-agendar:active{transform:scale(.94);}
   ::-webkit-scrollbar{width:8px;height:8px;}
   ::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:4px;}
   .wrap{max-width:820px;margin:0 auto;padding:18px 16px;}
@@ -618,8 +623,7 @@ const ESFORCOS = [
   { id: "pesada", nome: "Pesada", gemas: 35, dica: "60+ min" }
 ];
 const ECON = {
-  tetoDia: 120,          // 💎 ganhos por dia em passadas (bônus de etapa fica fora)
-  carteiraMax: 300,      // acima disso não acumula
+  carteiraMax: 400,      // acima disso não acumula (não há teto de ganho por dia)
   passadasPagasDia: 2,   // por projeto; as seguintes contam progresso, mas pagam 0
   multTeto: 2,
   multPorFalta: 0.25,    // recorrentes: por dia previsto que ficou sem check-in
@@ -681,10 +685,9 @@ function cotarPassada(p, log, carteira, dia, pausas) {
   const nominal = Math.round(base * mult);
   if (feitoNoDia(log, p.projeto, dia) >= ECON.passadasPagasDia)
     return { base, mult, nominal, gemas: 0, motivo: ECON.passadasPagasDia + " passadas pagas hoje" };
-  const restDia = Math.max(0, ECON.tetoDia - ganhoNoDia(log, dia));
   const restCarteira = Math.max(0, ECON.carteiraMax - saldoGemas(log, carteira));
-  const gemas = Math.min(nominal, restDia, restCarteira);
-  const motivo = gemas >= nominal ? "" : restDia <= restCarteira ? "teto diário" : "carteira cheia";
+  const gemas = Math.min(nominal, restCarteira);
+  const motivo = gemas >= nominal ? "" : "carteira cheia";
   return { base, mult, nominal, gemas, motivo };
 }
 
@@ -710,6 +713,153 @@ function liberadoAte(carteira, agora) {
 const emergenciaNaSemana = (carteira, hoje) => (carteira || []).some(c =>
   c.tipo === "emergencia" && chaveSemanaISO(dataLocalDe(c.criadoEm)) === chaveSemanaISO(hoje));
 
+/* ============ AGENDA ============
+   Compromisso: { id, titulo, data, hora, duracao, projId, esforco, repetir, dias, excecoes }
+   - com projId: marcar = passada do projeto (paga como o projeto, com multiplicador)
+   - avulso: marcar grava no Log um evento com agendaId (paga pelo esforço escolhido, se houver) */
+const REPETIR = [
+  { id: "", nome: "Não repete" },
+  { id: "diaria", nome: "Diária" },
+  { id: "semanal", nome: "Semanal" },
+  { id: "mensal", nome: "Mensal" }
+];
+const horaAgora = () => { const d = new Date(); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+const fmtDur = min => !min ? "" : min < 60 ? min + " min" : Math.floor(min / 60) + "h" + (min % 60 ? String(min % 60).padStart(2, "0") : "");
+
+function ocorreNoDia(item, iso) {
+  if (!item.data || iso < item.data) return false;
+  if ((item.excecoes || []).indexOf(iso) !== -1) return false;
+  const r = item.repetir || "";
+  if (!r) return iso === item.data;
+  if (r === "diaria") return true;
+  if (r === "semanal") {
+    const ds = item.dias || [];
+    return ds.length ? ds.indexOf(idxDia(iso)) !== -1 : idxDia(iso) === idxDia(item.data);
+  }
+  if (r === "mensal") return Number(iso.slice(8, 10)) === Math.min(Number(item.data.slice(8, 10)), diasNoMesDe(iso));
+  return false;
+}
+function resumoRepetir(item) {
+  if (!item.repetir) return "";
+  if (item.repetir === "semanal") {
+    const ds = item.dias || [];
+    return ds.length ? ds.slice().sort((a, b) => a - b).map(i => DIAS_CURTO[i]).join(", ") : "toda " + DIAS_CURTO[idxDia(item.data)];
+  }
+  if (item.repetir === "mensal") return "todo dia " + Number(item.data.slice(8, 10));
+  return "todo dia";
+}
+
+// avulso: esforço fixo, sem multiplicador de falta; respeita a carteira máxima
+function cotarAvulsa(item, log, carteira, dia) {
+  const e = ESFORCOS.find(x => x.id === item.esforco);
+  if (!e) return { base: 0, mult: 1, nominal: 0, gemas: 0, motivo: "" };
+  const restCarteira = Math.max(0, ECON.carteiraMax - saldoGemas(log, carteira));
+  const gemas = Math.min(e.gemas, restCarteira);
+  const motivo = gemas >= e.gemas ? "" : "carteira cheia";
+  return { base: e.gemas, mult: 1, nominal: e.gemas, gemas, motivo };
+}
+// índice do evento do Log que marcou este avulso neste dia (-1 = não feito)
+function eventoAvulso(log, item, dia) {
+  for (let k = (log || []).length - 1; k >= 0; k--) if (log[k].agendaId === item.id && log[k].data === dia) return k;
+  return -1;
+}
+
+/* Tudo que acontece num dia, pronto para a linha do tempo:
+   projetos recorrentes previstos, compromissos e rotinas.
+   Um compromisso ligado a um projeto substitui a linha recorrente dele naquele dia. */
+function agendaDoDia(dia, projetos, rotinas, agenda, log) {
+  const out = [];
+  const itens = (agenda || []).filter(a => ocorreNoDia(a, dia));
+  const ligados = {};
+  itens.forEach(a => { if (a.projId) ligados[a.projId] = true; });
+  const passado = dia < todayISO();
+  (projetos || []).forEach(p => {
+    if (!ehRecorrente(p) || !previstoNoDia(p, dia) || ligados[p.projId]) return;
+    // no passado, só conta a partir do 1º check-in do projeto (antes disso ele nem existia)
+    if (passado) {
+      let primeiro = "";
+      (log || []).forEach(ev => { if (ev.projeto === p.projeto && (!primeiro || ev.data < primeiro)) primeiro = ev.data; });
+      if (!primeiro || dia < primeiro) return;
+    }
+    out.push({ key: "p-" + p.projId, tipo: "projeto", hora: p.hora || "", duracao: 0, p, feita: feitoNoDia(log, p.projeto, dia) > 0 });
+  });
+  itens.forEach(a => {
+    const p = a.projId ? (projetos || []).find(x => x.projId === a.projId) : null;
+    if (p) out.push({ key: "a-" + a.id, tipo: "projeto", hora: a.hora || "", duracao: a.duracao || 0, p, item: a, feita: feitoNoDia(log, p.projeto, dia) > 0 });
+    else out.push({ key: "a-" + a.id, tipo: "avulso", hora: a.hora || "", duracao: a.duracao || 0, item: a, feita: eventoAvulso(log, a, dia) !== -1 });
+  });
+  (rotinas || []).forEach(r => out.push({ key: "r-" + (r.projId || r.projeto), tipo: "rotina", hora: "", duracao: 0, p: r, feita: feitoNoDia(log, r.projeto, dia) > 0 }));
+  return out.sort((a, b) => (a.hora ? 0 : 1) - (b.hora ? 0 : 1) || (a.hora < b.hora ? -1 : a.hora > b.hora ? 1 : 0));
+}
+
+/* "violino amanhã 19h 30min" -> campos do compromisso.
+   Entende: hoje, amanhã, depois de amanhã, seg…dom, 15/09, 19h, 19:30, 30min,
+   toda seg e qua, todo dia, todo mês. Tudo continua ajustável nos chips. */
+const semAcento = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+const DIAS_NOMES = [["seg", "segunda"], ["ter", "terca"], ["qua", "quarta"], ["qui", "quinta"], ["sex", "sexta"], ["sab", "sabado"], ["dom", "domingo"]];
+const diaSemana = w => DIAS_NOMES.findIndex(([c, l]) => w === c || w === l || w.replace(/-feira$/, "").replace(/s$/, "") === l);
+
+function interpretarTexto(texto, projetos, hoje) {
+  const toks = String(texto || "").trim().split(/\s+/).filter(Boolean);
+  const n = toks.map(semAcento);
+  const usado = toks.map(() => false);
+  const marca = (...is) => is.forEach(i => { if (i < usado.length) usado[i] = true; });
+  const r = { repetir: "", dias: [] };
+  let temHora = false, m;
+  for (let i = 0; i < n.length; i++) {
+    const w = n[i], w1 = n[i + 1] || "", w2 = n[i + 2] || "";
+    if (w === "hoje") { r.data = hoje; marca(i); }
+    else if (w === "amanha") { r.data = somaDias(hoje, 1); marca(i); }
+    else if (w === "depois" && w1 === "de" && w2 === "amanha") { r.data = somaDias(hoje, 2); marca(i, i + 1, i + 2); }
+    else if (w === "todo" && w1 === "dia") { r.repetir = "diaria"; marca(i, i + 1); }
+    else if (w === "todos" && w1 === "os" && w2 === "dias") { r.repetir = "diaria"; marca(i, i + 1, i + 2); }
+    else if (w === "diariamente" || w === "diario" || w === "diaria") { r.repetir = "diaria"; marca(i); }
+    else if (w === "todo" && w1 === "mes") { r.repetir = "mensal"; marca(i, i + 1); }
+    else if (w === "mensal" || w === "mensalmente") { r.repetir = "mensal"; marca(i); }
+    else if (w === "semanal" || w === "semanalmente") { r.repetir = "semanal"; marca(i); }
+    else if (["toda", "todas", "todo", "todos"].indexOf(w) !== -1 && diaSemana(w1) !== -1) { r.repetir = "semanal"; marca(i); }
+    else if (diaSemana(w) !== -1) { r.dias.push(diaSemana(w)); marca(i); }
+    else if ((m = w.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/))) {
+      const ano = m[3] ? (m[3].length === 2 ? "20" + m[3] : m[3]) : hoje.slice(0, 4);
+      let iso = ano + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0");
+      if (!m[3] && iso < hoje) iso = (Number(ano) + 1) + iso.slice(4);
+      r.data = iso; marca(i);
+    }
+    else if ((m = w.match(/^(\d{1,3})(min|mins|minutos?)$/))) { r.duracao = Number(m[1]); marca(i); }
+    else if ((m = w.match(/^(\d{1,3})$/)) && /^(min|mins|minutos?)$/.test(w1)) { r.duracao = Number(m[1]); marca(i, i + 1); }
+    else if ((m = w.match(/^(\d{1,2})(?:h|:)(\d{2})?$/)) && Number(m[1]) <= 23) {
+      // o primeiro horário é a hora de início; um segundo vira duração ("19h 1h30")
+      if (!temHora) { r.hora = m[1].padStart(2, "0") + ":" + (m[2] || "00"); temHora = true; }
+      else r.duracao = Number(m[1]) * 60 + Number(m[2] || 0);
+      marca(i);
+    }
+  }
+  if (r.dias.length) {
+    if (r.dias.length > 1) r.repetir = r.repetir || "semanal";
+    if (!r.data) {
+      for (let k = 0; k < 7; k++) { const d = somaDias(hoje, k); if (r.dias.indexOf(idxDia(d)) !== -1) { r.data = d; break; } }
+    }
+    if (r.repetir !== "semanal") r.dias = [];
+  }
+  // conectivos colados a um termo reconhecido ("às 19h", "seg e qua") saem do título
+  const conect = ["as", "a", "na", "no", "em", "e", "de", "da", "do", "para", "pra", "por"];
+  for (let pass = 0; pass < 2; pass++)
+    for (let i = 0; i < n.length; i++)
+      if (!usado[i] && conect.indexOf(n[i]) !== -1 && (usado[i + 1] || (i === n.length - 1 && usado[i - 1]))) usado[i] = true;
+
+  const resto = toks.filter((_, i) => !usado[i]);
+  const restoN = resto.map(semAcento).filter(w => w.length >= 4);
+  let melhor = null, pontos = 0;
+  (projetos || []).forEach(p => {
+    const pal = semAcento(p.projeto).split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+    const s = restoN.filter(w => pal.some(q => q.startsWith(w) || w.startsWith(q))).length;
+    if (s > pontos) { pontos = s; melhor = p; }
+  });
+  r.projId = melhor ? melhor.projId : "";
+  r.titulo = resto.join(" ");
+  return r;
+}
+
 /* Migracao: versoes antigas guardavam recorrencia por etapa e nao tinham
    data de conclusao. Sobe a recorrencia pro projeto e deduz a data pelo Log. */
 const normalizarLog = log => (log || []).map(ev => ({
@@ -730,6 +880,7 @@ function migrarProjetos(projects, log) {
     const np = { ...p };
     np.ultimoAvanco = normISO(p.ultimoAvanco);
     np.esforco = p.esforco || (p.tipo === "Rotina" ? "leve" : "media");
+    np.hora = p.hora || "";
     if (!recorrenciaDe(np)) {
       const fonte = (p.etapas || []).find(e => ehRecorrente(e));
       if (fonte) {
@@ -771,6 +922,7 @@ function rowsToProjects(rows) {
         ultimoAvanco: normISO(r.ultimoAvanco),
         escola: r.escola || "",
         esforco: r.esforco || "",
+        hora: r.hora || "",
         recorrencia: "",
         dias: [],
         diaMes: 0,
@@ -825,6 +977,7 @@ function projectsToRows(projects) {
         concluidaEm: "",
         escola: p.escola || "",
         esforco: p.esforco || "",
+        hora: p.hora || "",
         semanal: recorrenciaDe(p) === "semanal",
         recorrencia: recorrenciaDe(p),
         dias: (p.dias || []).join(","),
@@ -851,6 +1004,7 @@ function projectsToRows(projects) {
         concluidaEm: e.concluidaEm || "",
         escola: p.escola || "",
         esforco: p.esforco || "",
+        hora: p.hora || "",
         semanal: recorrenciaDe(p) === "semanal",
         recorrencia: recorrenciaDe(p),
         dias: (p.dias || []).join(","),
@@ -888,6 +1042,9 @@ function App() {
   const [view, setView] = useState("home"); // home | checkins | progresso | calendario
   const [aviso, setAviso] = useState(null); // {projId, projeto, etapa} -> modal "etapa concluida"
   const [carteira, setCarteira] = useState([]); // compras de jogo, emergências e pausas
+  const [agenda, setAgenda] = useState([]); // compromissos com data/hora (avulsos ou ligados a projeto)
+  const [agendando, setAgendando] = useState(null); // {data} = novo | {item, dia} = editar
+  const [ordenacao, setOrdenacao] = useState("personalizada"); // "recompensa" | "personalizada"
   const [carteiraAberta, setCarteiraAberta] = useState(false);
   const [toast, setToast] = useState(null); // {txt, id} -> "+20 💎"
   const [agora, setAgora] = useState(Date.now()); // relógio p/ contagem do desbloqueio
@@ -916,6 +1073,8 @@ function App() {
         setLog(logSalvo);
         setOrdemCat(data.ordemCat || []);
         setCarteira(data.carteira || []);
+        setAgenda(data.agenda || []);
+        setOrdenacao(data.ordenacao || "personalizada");
       } catch (e) {}
     }
     setLoaded(true);
@@ -929,10 +1088,12 @@ function App() {
       log,
       ordemCat,
       carteira,
+      agenda,
+      ordenacao,
       savedAt: Date.now()
     }));
     dirty.current = true;
-  }, [projects, log, ordemCat, carteira, loaded]);
+  }, [projects, log, ordemCat, carteira, agenda, ordenacao, loaded]);
 
   // Auto-push pro Sheets (debounce 2s após a última mudança)
   useEffect(() => {
@@ -958,6 +1119,10 @@ function App() {
           action: "syncCarteira",
           carteira: carteira
         });
+        await apiCall({
+          action: "syncAgenda",
+          agenda: agenda
+        });
         dirty.current = false;
         setAutoState("ok");
         setTimeout(() => setAutoState("idle"), 1500);
@@ -968,7 +1133,7 @@ function App() {
     return () => {
       if (pushTimer.current) clearTimeout(pushTimer.current);
     };
-  }, [projects, log, carteira, loaded]);
+  }, [projects, log, carteira, agenda, loaded]);
 
   /* Rotinas voltam ao zero quando vira o dia (ou a semana). */
 function resetRotinas(list) {
@@ -1127,7 +1292,7 @@ function resetRotinas(list) {
       return { ...p, etapas, ultimoAvanco: dia > ant ? dia : ant };
     }));
     const cot = cotar(target, dia);
-    // bônus de etapa: 1x a base, fora do teto diário, mas respeita a carteira máxima
+    // bônus de etapa: 1x a base, respeitando a carteira máxima
     const bonus = fechou && meta >= ECON.bonusMinPassadas ? Math.max(0, Math.min(esforcoDe(target).gemas,
       ECON.carteiraMax - (saldo + cot.gemas))) : 0;
     setLog(prev => [...prev, {
@@ -1319,6 +1484,46 @@ function resetRotinas(list) {
       .filter(c => !(c.tipo === "pausa" && c.inicio === hoje))
       .map(c => c.tipo === "pausa" && c.inicio < hoje && c.fim >= hoje ? { ...c, fim: somaDias(hoje, -1) } : c));
   }
+
+  /* ---- AGENDA ---- */
+  const cotarAv = (item, dia) => cotarAvulsa(item, log, carteira, dia || todayISO());
+  function salvarAgenda(item) {
+    setAgenda(prev => prev.some(a => a.id === item.id) ? prev.map(a => a.id === item.id ? item : a) : [...prev, item]);
+    setAgendando(null);
+  }
+  // soDia: esconde só uma ocorrência de um compromisso que repete
+  function excluirAgenda(item, soDia) {
+    setAgenda(prev => soDia
+      ? prev.map(a => a.id === item.id ? { ...a, excecoes: [...(a.excecoes || []), soDia] } : a)
+      : prev.filter(a => a.id !== item.id));
+    setAgendando(null);
+  }
+  function tickAvulso(item, dia) {
+    if (dia > todayISO()) return;
+    const k = eventoAvulso(log, item, dia);
+    if (k !== -1) {
+      setLog(log.filter((_, j) => j !== k));
+      return;
+    }
+    const cot = cotarAv(item, dia);
+    setLog(prev => [...prev, {
+      data: dia, projeto: "", categoria: "Agenda", etapa: item.titulo,
+      gemas: cot.gemas, mult: 1, bonus: 0, agendaId: item.id
+    }]);
+    if (item.esforco) avisarGemas(cot, 0);
+  }
+  // marcar/desmarcar uma linha da agenda do dia
+  function tickEntrada(e, dia) {
+    if (e.tipo === "avulso") return tickAvulso(e.item, dia);
+    if (e.tipo === "rotina") return checkinRotina(e.p, dia);
+    if (e.feita) return desfazerCheckin(e.p, dia);
+    if (!etapaVigente(e.p)) return setEditing({ ref: e.p, ...e.p });
+    avancar(e.p, dia);
+  }
+  function abrirEntrada(e, dia) {
+    if (e.item) setAgendando({ item: e.item, dia });
+    else if (e.tipo === "projeto") setEditing({ ref: e.p, ...e.p });
+  }
   function saveEdited(proj, isNew) {
     if (isNew) setProjects(prev => [...prev, proj]);else setProjects(prev => prev.map(p => proj.projId && p.projId === proj.projId || p === editing.ref ? proj : p));
     setEditing(null);
@@ -1348,12 +1553,16 @@ function resetRotinas(list) {
       const rc = await apiCall({
         action: "getCarteira"
       });
+      const ra = await apiCall({
+        action: "getAgenda"
+      });
       if (r.ok) {
         const logNuvem = (rl.ok && rl.log) ? normalizarLog(rl.log) : [];
         const migrados2 = migrarProjetos(rowsToProjects(r.rows), logNuvem);
         setProjects(arquivarConcluidas(resetRotinas(migrados2), logNuvem));
         if (rl.ok) setLog(logNuvem);
         if (rc.ok) setCarteira(rc.carteira || []);
+        if (ra.ok) setAgenda(ra.agenda || []);
         firstSave.current = true; // não re-empurra logo após puxar
         setPullReminder(false); // já puxou, pode mexer
         setSyncState("ok");
@@ -1383,30 +1592,44 @@ function resetRotinas(list) {
   }), view === "checkins" ? /*#__PURE__*/React.createElement(CheckinsView, {
     projetos: projetos,
     rotinas: rotinas,
+    agenda: agenda,
     log: log,
     onCheckin: avancar,
-    onDesfazer: desfazerCheckin,
-    onCheckinRotina: checkinRotina,
     onEdit: p => setEditing({ ref: p, ...p }),
-    onCotar: cotar
+    onCotar: cotar,
+    onCotarAvulsa: cotarAv,
+    onTick: tickEntrada,
+    onAbrir: abrirEntrada,
+    onNovo: dia => setAgendando({ data: dia })
   }) : view === "calendario" ? /*#__PURE__*/React.createElement(CalendarioView, {
     projetos: projetos,
-    log: log
+    rotinas: rotinas,
+    agenda: agenda,
+    log: log,
+    onCotar: cotar,
+    onCotarAvulsa: cotarAv,
+    onTick: tickEntrada,
+    onAbrir: abrirEntrada,
+    onNovo: dia => setAgendando({ data: dia })
   }) : view === "progresso" ? /*#__PURE__*/React.createElement(ProgressoView, {
     projetos: projetos,
-    log: log
+    log: log.filter(ev => !ev.agendaId) // avulsos não contam como passadas
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, favoritos.length > 0 && /*#__PURE__*/React.createElement(FocusBand, {
-    favoritos: favoritos
+    favoritos: favoritos,
+    onCotar: cotar
   }), /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
       justifyContent: "space-between",
-      margin: "22px 0 12px"
+      margin: "22px 0 12px",
+      flexWrap: "wrap",
+      rowGap: 10
     }
   }, /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
-      gap: 8
+      gap: 8,
+      flexWrap: "wrap"
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
@@ -1418,7 +1641,21 @@ function resetRotinas(list) {
       fontSize: 12,
       color: "var(--text-3)"
     }
-  }, projetos.length)), /*#__PURE__*/React.createElement("button", {
+  }, projetos.length), /*#__PURE__*/React.createElement("div", {
+    className: "row",
+    style: { gap: 2, marginLeft: 4, background: "var(--bg-elev2)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 2 }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: { fontSize: 10.5, color: "var(--text-3)", padding: "0 5px 0 6px" }
+  }, "Ordenar"), [["recompensa", "💎 Recompensa", "quem paga mais primeiro"], ["personalizada", "↕ Personalizada", "a ordem das setas"]].map(([id, txt, dica]) => /*#__PURE__*/React.createElement("span", {
+    key: id,
+    title: dica,
+    onClick: () => setOrdenacao(id),
+    style: {
+      cursor: "pointer", fontSize: 11, fontWeight: 600, padding: "4px 8px", borderRadius: 6,
+      background: ordenacao === id ? "var(--lime-soft)" : "transparent",
+      color: ordenacao === id ? "var(--lime)" : "var(--text-3)"
+    }
+  }, txt)))), /*#__PURE__*/React.createElement("button", {
     className: "btn btn-primary btn-sm",
     onClick: () => setEditing({
       ref: "new",
@@ -1430,7 +1667,18 @@ function resetRotinas(list) {
       tipo: "Projeto"
     })
   }), (() => {
-    const cats = ordenarCategorias(Object.keys(porCategoria), ordemCat);
+    // Recompensa: projetos que pagam mais primeiro (trilha concluída vai pro fim);
+    // categorias pela maior recompensa que têm. Personalizada: a ordem das setas.
+    const porRecompensa = ordenacao === "recompensa";
+    const valorProj = p => etapaVigente(p) ? cotar(p).gemas : -1;
+    const grupos = {};
+    Object.keys(porCategoria).forEach(nome => {
+      grupos[nome] = porRecompensa ? porCategoria[nome].slice().sort((a, b) => valorProj(b) - valorProj(a)) : porCategoria[nome];
+    });
+    const topo = nome => Math.max(...grupos[nome].map(valorProj));
+    const cats = porRecompensa
+      ? Object.keys(grupos).sort((a, b) => topo(b) - topo(a) || a.localeCompare(b))
+      : ordenarCategorias(Object.keys(porCategoria), ordemCat);
     return cats.map((nome, ci) => {
       const cat = CATEGORIAS.find(c => c.nome === nome) || {
         nome,
@@ -1439,7 +1687,7 @@ function resetRotinas(list) {
       return /*#__PURE__*/React.createElement(CategoriaBloco, {
         key: nome,
         cat: cat,
-        projetos: porCategoria[nome],
+        projetos: grupos[nome],
         onAvancar: avancar,
         onVoltar: voltar,
         onToggleEtapa: toggleEtapa,
@@ -1449,8 +1697,8 @@ function resetRotinas(list) {
           ...p
         }),
         onRemove: removeProject,
-        onMover: moverProjeto,
-        onMoverCat: moverCategoria,
+        onMover: porRecompensa ? null : moverProjeto,
+        onMoverCat: porRecompensa ? null : moverCategoria,
         onCotar: cotar,
         catFirst: ci === 0,
         catLast: ci === cats.length - 1
@@ -1495,7 +1743,18 @@ function resetRotinas(list) {
       padding: "9px 16px", borderRadius: 20, fontSize: 13, fontWeight: 600,
       maxWidth: "calc(100% - 32px)", textAlign: "center", boxShadow: "0 6px 20px #0008"
     }
-  }, toast.txt), API_URL && pullReminder && /*#__PURE__*/React.createElement(PullOverlay, {
+  }, toast.txt), !agendando && !editing && !carteiraAberta && /*#__PURE__*/React.createElement("button", {
+    className: "fab-agendar",
+    title: "Agendar compromisso",
+    onClick: () => setAgendando({ data: todayISO() })
+  }, "＋"), agendando && /*#__PURE__*/React.createElement(AgendarModal, {
+    inicial: agendando,
+    projetos: projetos,
+    onCotar: cotar,
+    onSalvar: salvarAgenda,
+    onExcluir: excluirAgenda,
+    onClose: () => setAgendando(null)
+  }), API_URL && pullReminder && /*#__PURE__*/React.createElement(PullOverlay, {
     estado: syncState,
     falhou: falhouPull,
     onPull: () => pull(true),
@@ -1656,7 +1915,8 @@ function Header({
   }, tab("home", "🎯 Foco"), tab("checkins", "✅ Check-ins"), tab("progresso", "📊 Progresso"), tab("calendario", "🗓️ Calendário")));
 }
 function FocusBand({
-  favoritos
+  favoritos,
+  onCotar
 }) {
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -1687,6 +1947,8 @@ function FocusBand({
   }, favoritos.map((p, i) => {
     const next = p.etapas.find(e => !e.concluida);
     const prog = progressoPassadas(p.etapas);
+    const cot = next && onCotar ? onCotar(p) : null;
+    const quente = cot && cot.mult > 1 && cot.gemas > 0;
     return /*#__PURE__*/React.createElement("div", {
       key: p.projId || p.projeto,
       className: "focus-card fade",
@@ -1713,12 +1975,21 @@ function FocusBand({
         color: "var(--warn)"
       }
     }, "★")), /*#__PURE__*/React.createElement("div", {
+      className: "row",
       style: {
+        justifyContent: "space-between",
+        gap: 6,
         fontSize: 11,
         color: "var(--text-3)",
         marginBottom: 3
       }
-    }, "Próximo passo"), /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement("span", null, "Próximo passo"), cot && /*#__PURE__*/React.createElement("span", {
+      title: cot.motivo || (quente ? "projeto em falta: vale mais que o normal" : ""),
+      style: {
+        fontWeight: 700,
+        color: cot.gemas === 0 ? "var(--text-3)" : quente ? "var(--warn)" : "var(--lime)"
+      }
+    }, "+" + cot.gemas + " 💎")), /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 14,
         fontWeight: 600,
@@ -1804,7 +2075,7 @@ function CategoriaBloco({
   catFirst,
   catLast
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false); // começa fechada: menos poluição, abre ao tocar
   const agg = projetos.reduce((a, p) => {
     const g = progressoPassadas(p.etapas);
     a.f += g.feitas;
@@ -2298,20 +2569,131 @@ function LineChart({
    CALENDÁRIO — o registro transparente do que foi feito.
    Lê o Log (que é a mesma fonte que o jogo usa para dar XP).
    ========================================================== */
-/* ============ ABA CHECK-INS (por PROJETO) ============ */
-function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckinRotina, onEdit, onCotar }) {
-  const hoje = todayISO();
-  // 💎 do cartão: o que já rendeu (feito) ou o que vai render (pendente)
-  const valorCartao = (p, feita) => {
-    if (diaSel > hoje) return null;
-    if (feita) {
-      const g = (log || []).filter(ev => ev.projeto === p.projeto && ev.data === diaSel)
-        .reduce((s, ev) => s + (ev.gemas || 0) + (ev.bonus || 0), 0);
-      return { txt: "+" + g + " 💎", dim: true };
+/* ============ LINHA DO TEMPO DE UM DIA (Check-ins e Calendário) ============ */
+function DiaAgenda({ dia, entradas, log, onTick, onAbrir, onCotar, onCotarAvulsa }) {
+  const hoje = todayISO(), agora = horaAgora();
+  const futuro = dia > hoje;
+
+  // 💎 que a linha já rendeu neste dia
+  const ganhoDe = e => {
+    if (e.tipo === "avulso") {
+      const k = eventoAvulso(log, e.item, dia);
+      return k === -1 ? 0 : (log[k].gemas || 0);
     }
-    const cot = onCotar(p, diaSel);
-    return { txt: "+" + cot.gemas + " 💎", hot: cot.mult > 1 && cot.gemas > 0, title: cot.motivo };
+    return (log || []).filter(ev => ev.projeto === e.p.projeto && ev.data === dia && !ev.agendaId)
+      .reduce((s, ev) => s + (ev.gemas || 0) + (ev.bonus || 0), 0);
   };
+
+  const linha = e => {
+    const p = e.p, it = e.item;
+    const et = e.tipo === "projeto" ? etapaVigente(p) : null;
+    const emoji = e.tipo === "avulso" ? "📅" : (p.emoji || (e.tipo === "rotina" ? "🌱" : "📌"));
+    const titulo = (it && it.titulo) || (p ? p.projeto : "");
+    const partes = [];
+    if (e.tipo === "projeto") {
+      if (it && it.titulo && it.titulo !== p.projeto) partes.push(p.projeto);
+      partes.push(et ? et.texto : "⚠️ sem próxima etapa — toque para definir");
+    }
+    if (e.tipo === "rotina") partes.push("rotina");
+    const rep = it ? resumoRepetir(it) : e.tipo === "projeto" ? resumoRec(p) : "";
+    if (rep) partes.push("🔁 " + rep);
+
+    let valor = null;
+    if (e.feita) {
+      const g = ganhoDe(e);
+      if (g > 0) valor = { txt: "+" + g + " 💎", cor: "var(--done-text)" };
+    } else if (!futuro) {
+      const cot = e.tipo === "avulso" ? (it.esforco ? onCotarAvulsa(it, dia) : null)
+        : (e.tipo === "rotina" || et) ? onCotar(p, dia) : null;
+      if (cot) valor = {
+        txt: "+" + cot.gemas + " 💎", title: cot.motivo,
+        cor: cot.gemas === 0 ? "var(--text-3)" : cot.mult > 1 ? "var(--warn)" : "var(--lime)"
+      };
+    }
+    const atrasada = !e.feita && (dia < hoje || (dia === hoje && e.hora && e.hora < agora));
+
+    return /*#__PURE__*/React.createElement("div", {
+      key: e.key, className: "row", style: { gap: 10, alignItems: "stretch", marginBottom: 6 }
+    },
+      /*#__PURE__*/React.createElement("div", { style: { width: 44, flex: "none", textAlign: "right", paddingTop: 11 } },
+        /*#__PURE__*/React.createElement("div", {
+          style: { fontSize: 12.5, fontWeight: 700, color: e.hora ? (atrasada ? "var(--warn)" : "var(--text)") : "var(--text-3)" }
+        }, e.hora || "—"),
+        e.duracao > 0 && /*#__PURE__*/React.createElement("div", { style: { fontSize: 10, color: "var(--text-3)" } }, fmtDur(e.duracao))),
+      /*#__PURE__*/React.createElement("div", {
+        style: { width: 3, flex: "none", borderRadius: 2, background: e.feita ? "var(--lime-dim)" : atrasada ? "var(--warn)" : "var(--border-strong)" }
+      }),
+      /*#__PURE__*/React.createElement("div", {
+        className: "row",
+        style: {
+          flex: 1, minWidth: 0, gap: 11, borderRadius: 11, padding: "10px 12px",
+          background: e.feita ? "transparent" : "var(--card)",
+          border: "1px solid " + (atrasada ? "#e0b75555" : "var(--border)"),
+          opacity: e.feita ? .68 : 1
+        }
+      },
+        /*#__PURE__*/React.createElement("span", {
+          onClick: () => { if (!futuro) onTick(e, dia); },
+          title: futuro ? "dia futuro" : e.feita ? "desfazer" : "marcar como feito",
+          style: {
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            width: 24, height: 24, borderRadius: 7, flex: "none",
+            cursor: futuro ? "default" : "pointer",
+            background: e.feita ? "var(--lime)" : "transparent",
+            border: e.feita ? "1px solid var(--lime)" : "1.5px solid " + (futuro ? "var(--border-strong)" : "var(--text-3)"),
+            color: "#0b0f0c", fontSize: 13, fontWeight: 700
+          }
+        }, e.feita ? "✓" : ""),
+        /*#__PURE__*/React.createElement("div", {
+          onClick: () => onAbrir(e, dia),
+          style: { flex: 1, minWidth: 0, cursor: e.tipo === "rotina" ? "default" : "pointer" }
+        },
+          /*#__PURE__*/React.createElement("div", {
+            style: {
+              fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+              color: e.feita ? "var(--done-text)" : "var(--text)", textDecoration: e.feita ? "line-through" : "none"
+            }
+          }, emoji + " " + titulo),
+          partes.length > 0 && /*#__PURE__*/React.createElement("div", {
+            style: {
+              fontSize: 11, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+              color: e.tipo === "projeto" && !et ? "var(--warn)" : "var(--text-3)"
+            }
+          }, partes.join(" · "))),
+        valor && /*#__PURE__*/React.createElement("span", {
+          title: valor.title || "", style: { fontSize: 12, fontWeight: 700, flex: "none", color: valor.cor }
+        }, valor.txt)));
+  };
+
+  const marcadorAgora = /*#__PURE__*/React.createElement("div", {
+    key: "agora", className: "row", style: { gap: 8, margin: "2px 0 8px", alignItems: "center" }
+  },
+    /*#__PURE__*/React.createElement("span", {
+      style: { width: 44, flex: "none", textAlign: "right", fontSize: 10.5, fontWeight: 700, color: "var(--danger)" }
+    }, agora),
+    /*#__PURE__*/React.createElement("span", { style: { width: 9, height: 9, borderRadius: "50%", background: "var(--danger)", flex: "none" } }),
+    /*#__PURE__*/React.createElement("div", { style: { flex: 1, height: 2, background: "var(--danger)", opacity: .7, borderRadius: 1 } }));
+
+  const comHora = entradas.filter(e => e.hora), semHora = entradas.filter(e => !e.hora);
+  const nodes = [];
+  let agoraPosto = dia !== hoje;
+  comHora.forEach(e => {
+    if (!agoraPosto && e.hora > agora) { nodes.push(marcadorAgora); agoraPosto = true; }
+    nodes.push(linha(e));
+  });
+  if (!agoraPosto && comHora.length) nodes.push(marcadorAgora);
+  if (semHora.length) {
+    if (comHora.length) nodes.push(/*#__PURE__*/React.createElement("div", {
+      key: "sem-hora", style: { fontSize: 10.5, color: "var(--text-3)", margin: "12px 0 6px 54px", textTransform: "uppercase", letterSpacing: .5 }
+    }, "sem horário"));
+    semHora.forEach(e => nodes.push(linha(e)));
+  }
+  return /*#__PURE__*/React.createElement("div", null, nodes);
+}
+
+/* ============ ABA CHECK-INS: A AGENDA DO DIA ============ */
+function CheckinsView({ projetos, rotinas, agenda, log, onCheckin, onEdit, onCotar, onCotarAvulsa, onTick, onAbrir, onNovo }) {
+  const hoje = todayISO();
   const [diaSel, setDiaSel] = useState(hoje);
   const [adiado, setAdiado] = useState(() => {
     try { return localStorage.getItem(LS_ADIADO) === hoje; } catch (e) { return false; }
@@ -2325,75 +2707,22 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
     [projetos, log, diaSel, hoje]);
   const inicio = chaveSemanaISO(diaSel);
   const dias = Array.from({ length: 7 }, (_, i) => somaDias(inicio, i));
-
-  const itens = useMemo(
-    () => (projetos || []).filter(p => ehRecorrente(p) && previstoNoDia(p, diaSel)),
-    [projetos, diaSel]);
-
-  const rots = rotinas || [];
-  const totalDia = iso => (log || []).filter(ev => String(ev.data).slice(0, 10) === iso).length;
-  const ok = itens.filter(p => feitoNoDia(log, p.projeto, diaSel) > 0).length
-           + rots.filter(r => feitoNoDia(log, r.projeto, diaSel) > 0).length;
-  const total = itens.length + rots.length;
+  const entradas = useMemo(
+    () => agendaDoDia(diaSel, projetos, rotinas, agenda, log),
+    [diaSel, projetos, rotinas, agenda, log]);
+  const total = entradas.length, ok = entradas.filter(e => e.feita).length;
   const pct = total ? Math.round(ok / total * 100) : 0;
+  const totalDia = iso => (log || []).filter(ev => String(ev.data).slice(0, 10) === iso).length;
 
   const labelSemana = (() => {
     const a = diaLocal(dias[0]), b = diaLocal(dias[6]);
     const m = d => d.toLocaleDateString("pt-BR", { month: "short" }).replace(".", "");
-    return a.getDate() + " " + m(a) + " \u2013 " + b.getDate() + " " + m(b);
+    return a.getDate() + " " + m(a) + " – " + b.getDate() + " " + m(b);
   })();
   const labelDia = (() => {
     const t = diaLocal(diaSel).toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
-    return diaSel === hoje ? t + " \u00B7 hoje" : t;
+    return diaSel === hoje ? t + " · hoje" : t;
   })();
-
-  const cartao = (key, emoji, titulo, sub, feita, bloqueada, dots, extra, acao, valor) =>
-    /*#__PURE__*/React.createElement("div", {
-      key: key,
-      className: "row",
-      onClick: () => { if (!bloqueada) acao(); },
-      style: {
-        gap: 11, alignItems: "center",
-        background: feita ? "transparent" : "var(--card)",
-        border: "1px solid " + (feita ? "transparent" : "var(--border)"),
-        borderRadius: 11, padding: "11px 12px", marginBottom: 6,
-        cursor: bloqueada ? "default" : "pointer",
-        opacity: bloqueada ? 0.45 : feita ? 0.68 : 1
-      }
-    },
-      /*#__PURE__*/React.createElement("span", {
-        style: {
-          display: "inline-flex", alignItems: "center", justifyContent: "center",
-          width: 22, height: 22, borderRadius: 7, flex: "none",
-          background: feita ? "var(--lime)" : "transparent",
-          border: feita ? "1px solid var(--lime)" : "1.5px solid var(--text-3)",
-          color: "#0b0f0c", fontSize: 13, fontWeight: 700
-        }
-      }, feita ? "\u2713" : ""),
-      /*#__PURE__*/React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-        /*#__PURE__*/React.createElement("div", {
-          style: {
-            fontSize: 11, color: "var(--text-3)",
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
-          }
-        }, emoji + " " + titulo),
-        /*#__PURE__*/React.createElement("div", {
-          style: {
-            fontSize: 13.5, fontWeight: 600, marginTop: 2,
-            color: extra ? "var(--warn)" : feita ? "var(--done-text)" : "var(--text)",
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
-          }
-        }, sub)),
-      dots && /*#__PURE__*/React.createElement("span", {
-        style: { fontSize: 11, color: "var(--text-3)", letterSpacing: 1.5, flex: "none" }
-      }, dots),
-      valor && /*#__PURE__*/React.createElement("span", {
-        title: valor.title || "",
-        style: {
-          fontSize: 12, fontWeight: 700, flex: "none",
-          color: valor.dim ? "var(--done-text)" : valor.hot ? "var(--warn)" : "var(--lime)"
-        }
-      }, valor.txt));
 
   return /*#__PURE__*/React.createElement("div", { className: "fade" },
 
@@ -2403,12 +2732,12 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
       /*#__PURE__*/React.createElement("span", {
         onClick: () => setDiaSel(somaDias(diaSel, -7)),
         style: { cursor: "pointer", color: "var(--text-2)", fontSize: 18, padding: "2px 10px" }
-      }, "\u2039"),
+      }, "‹"),
       /*#__PURE__*/React.createElement("span", { style: { fontSize: 14, fontWeight: 600 } }, labelSemana),
       /*#__PURE__*/React.createElement("span", {
         onClick: () => setDiaSel(somaDias(diaSel, 7)),
         style: { cursor: "pointer", color: "var(--text-2)", fontSize: 18, padding: "2px 10px" }
-      }, "\u203A")),
+      }, "›")),
 
     /*#__PURE__*/React.createElement("div", {
       style: { display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 5 }
@@ -2423,7 +2752,7 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
           padding: "8px 0 7px", borderRadius: 10, cursor: "pointer",
           background: sel ? "var(--lime-soft)" : "var(--card)",
           border: sel ? "1.5px solid var(--lime)" : ehHoje ? "1px solid var(--warn)" : "1px solid var(--border)",
-          opacity: futuro ? 0.45 : 1
+          opacity: futuro ? 0.6 : 1
         }
       },
         /*#__PURE__*/React.createElement("span", {
@@ -2441,20 +2770,20 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
         }));
     })),
 
-    /*#__PURE__*/React.createElement("div", { style: { marginTop: 18, marginBottom: 12 } },
+    /*#__PURE__*/React.createElement("div", { style: { marginTop: 18, marginBottom: 14 } },
       /*#__PURE__*/React.createElement("div", {
-        className: "row", style: { justifyContent: "space-between", alignItems: "baseline" }
+        className: "row", style: { justifyContent: "space-between", alignItems: "baseline", gap: 8 }
       },
         /*#__PURE__*/React.createElement("span", {
           style: { fontSize: 14, fontWeight: 600, textTransform: "capitalize" }
         }, labelDia),
         diaSel !== hoje && /*#__PURE__*/React.createElement("span", {
           onClick: () => setDiaSel(hoje),
-          style: { cursor: "pointer", fontSize: 11, color: "var(--lime)" }
+          style: { cursor: "pointer", fontSize: 11, color: "var(--lime)", flex: "none" }
         }, "ir para hoje")),
       /*#__PURE__*/React.createElement("div", {
         style: { fontSize: 11.5, color: "var(--text-3)", margin: "5px 0 7px" }
-      }, total ? ok + " de " + total + " check-in(s)" : "nada previsto para este dia"),
+      }, total ? ok + " de " + total + " feito(s)" : "nada previsto para este dia"),
       total > 0 && /*#__PURE__*/React.createElement("div", {
         style: { height: 5, background: "var(--bg-elev2)", borderRadius: 4, overflow: "hidden" }
       }, /*#__PURE__*/React.createElement("div", {
@@ -2471,8 +2800,8 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
             borderRadius: 9, background: "var(--bg-elev2)",
             border: "1px solid var(--border)", fontSize: 11.5, color: "var(--text-3)"
           }
-        }, "\u23F0 " + resgate.length + " ficaram para tr\u00E1s nesta semana",
-          /*#__PURE__*/React.createElement("span", { style: { marginLeft: "auto" } }, "\u203A"))
+        }, "⏰ " + resgate.length + " ficaram para trás nesta semana",
+          /*#__PURE__*/React.createElement("span", { style: { marginLeft: "auto" } }, "›"))
       : /*#__PURE__*/React.createElement("div", {
           style: {
             marginBottom: 16, padding: "12px 13px", borderRadius: 12,
@@ -2484,84 +2813,43 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
         },
           /*#__PURE__*/React.createElement("span", {
             style: { fontSize: 11.5, fontWeight: 600, color: "var(--text-2)" }
-          }, "\u23F0 Ficaram para tr\u00E1s nesta semana"),
+          }, "⏰ Ficaram para trás nesta semana"),
           /*#__PURE__*/React.createElement("span", {
             onClick: () => adiar(true),
             style: { cursor: "pointer", fontSize: 11, color: "var(--text-3)" }
           }, "deixar pra depois")),
-
         resgate.map(({ p, faltou }) => {
           const et = etapaVigente(p);
           const quando = faltou.map(d => DIAS_CURTO[idxDia(d)]).join(", ");
           return /*#__PURE__*/React.createElement("div", {
             key: "rg-" + p.projId,
             className: "row",
-            style: {
-              gap: 10, alignItems: "center", padding: "9px 0",
-              borderTop: "1px solid var(--border)"
-            }
+            style: { gap: 10, alignItems: "center", padding: "9px 0", borderTop: "1px solid var(--border)" }
           },
             /*#__PURE__*/React.createElement("div", { style: { flex: 1, minWidth: 0 } },
               /*#__PURE__*/React.createElement("div", {
-                style: {
-                  fontSize: 11, color: "var(--text-3)",
-                  whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
-                }
-              }, (p.emoji || "\uD83D\uDCCC") + " " + p.projeto + " \u00B7 faltou " + quando),
+                style: { fontSize: 11, color: "var(--text-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+              }, (p.emoji || "📌") + " " + p.projeto + " · faltou " + quando),
               /*#__PURE__*/React.createElement("div", {
                 style: {
-                  fontSize: 13, fontWeight: 600, marginTop: 2,
-                  color: et ? "var(--text)" : "var(--warn)",
+                  fontSize: 13, fontWeight: 600, marginTop: 2, color: et ? "var(--text)" : "var(--warn)",
                   whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
                 }
-              }, et ? et.texto : "sem pr\u00F3xima etapa")),
+              }, et ? et.texto : "sem próxima etapa")),
             /*#__PURE__*/React.createElement("button", {
               className: "btn btn-sm",
               style: { flex: "none", borderColor: "var(--lime-dim)", color: "var(--lime)" },
               onClick: () => et ? onCheckin(p, hoje) : onEdit(p)
             }, et ? "passar pra hoje · +" + onCotar(p, hoje).gemas + " 💎" : "definir"));
         }),
-
         /*#__PURE__*/React.createElement("div", {
           style: { fontSize: 10, color: "var(--text-3)", marginTop: 9, lineHeight: 1.5 }
-        }, "registra o check-in com a data de hoje \u00B7 a lista zera toda segunda"))),
+        }, "registra o check-in com a data de hoje · a lista zera toda segunda"))),
 
-    diaSel > hoje && /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 11.5, color: "var(--warn)", background: "var(--warn-soft)",
-        padding: "8px 11px", borderRadius: 9, marginBottom: 12
-      }
-    }, "\u26A0\uFE0F dia futuro \u2014 s\u00F3 d\u00E1 pra ver o que est\u00E1 previsto"),
-
-    itens.length > 0 && /*#__PURE__*/React.createElement("div", { style: { marginBottom: 16 } },
-      /*#__PURE__*/React.createElement("div", {
-        style: { fontSize: 11, fontWeight: 600, color: "var(--text-2)", marginBottom: 7 }
-      }, "\uD83C\uDFAF Projetos de hoje"),
-      itens.map(p => {
-        const et = etapaVigente(p);
-        const feita = feitoNoDia(log, p.projeto, diaSel) > 0;
-        if (!et) {
-          return cartao(p.projId, p.emoji || "\uD83D\uDCCC", p.projeto,
-            "\u26A0\uFE0F sem pr\u00F3xima etapa \u2014 toque para definir",
-            false, false, null, true, () => onEdit(p));
-        }
-        const meta = et.meta || 1, pas = et.passadas || 0;
-        const dots = meta > 1 ? "\u25CF".repeat(Math.min(pas, meta)) + "\u25CB".repeat(Math.max(0, meta - pas)) : null;
-        return cartao(p.projId, p.emoji || "\uD83D\uDCCC", p.projeto, et.texto,
-          feita, diaSel > hoje, dots, false,
-          () => feita ? onDesfazer(p, diaSel) : onCheckin(p, diaSel),
-          valorCartao(p, feita));
-      })),
-
-    rots.length > 0 && /*#__PURE__*/React.createElement("div", { style: { marginBottom: 16 } },
-      /*#__PURE__*/React.createElement("div", {
-        style: { fontSize: 11, fontWeight: 600, color: "var(--text-2)", marginBottom: 7 }
-      }, "\uD83C\uDF31 Rotinas"),
-      rots.map(r => cartao("rot-" + (r.projId || r.projeto), r.emoji || "\uD83C\uDF31",
-        (r.rotinaFreq === "Semanal" ? "semanal" : "di\u00E1ria") + " \u00B7 " + r.categoria,
-        r.projeto, feitoNoDia(log, r.projeto, diaSel) > 0, diaSel > hoje, null, false,
-        () => onCheckinRotina(r, diaSel),
-        valorCartao(r, feitoNoDia(log, r.projeto, diaSel) > 0)))),
+    total > 0 && /*#__PURE__*/React.createElement(DiaAgenda, {
+      dia: diaSel, entradas: entradas, log: log,
+      onTick: onTick, onAbrir: onAbrir, onCotar: onCotar, onCotarAvulsa: onCotarAvulsa
+    }),
 
     total === 0 && /*#__PURE__*/React.createElement("div", {
       style: {
@@ -2570,10 +2858,182 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
       }
     },
       /*#__PURE__*/React.createElement("div", { style: { fontSize: 13, color: "var(--text-2)", marginBottom: 6 } },
-        "Nenhum check-in previsto"),
+        "Nada previsto"),
       /*#__PURE__*/React.createElement("div", { style: { fontSize: 11.5, color: "var(--text-3)", lineHeight: 1.5 } },
-        "Abra um projeto no \u270E e escolha a recorr\u00EAncia \u2014 ele passa a aparecer aqui com a etapa da vez."))
+        "Agende um compromisso ou dê recorrência e horário a um projeto no ✎.")),
+
+    /*#__PURE__*/React.createElement("button", {
+      className: "btn btn-ghost btn-sm",
+      style: { marginTop: 8, marginLeft: 50 },
+      onClick: () => onNovo(diaSel)
+    }, "＋ agendar neste dia")
   );
+}
+
+/* ============ AGENDAR: INSERÇÃO RÁPIDA EM TEXTO + CHIPS ============ */
+function AgendarModal({ inicial, projetos, onCotar, onSalvar, onExcluir, onClose }) {
+  const hoje = todayISO();
+  const editando = !!inicial.item;
+  const base = inicial.item || {
+    id: uid(), titulo: "", data: inicial.data || hoje, hora: "", duracao: 0,
+    projId: "", esforco: "", repetir: "", dias: [], excecoes: []
+  };
+  const [texto, setTexto] = useState(editando ? base.titulo : "");
+  const [f, setF] = useState(base);
+  // campos ajustados à mão não são mais sobrescritos pelo texto
+  const [mexido, setMexido] = useState(editando ? { data: 1, hora: 1, duracao: 1, projId: 1, repetir: 1 } : {});
+  const muda = patch => {
+    setF(prev => ({ ...prev, ...patch }));
+    setMexido(prev => {
+      const m = { ...prev };
+      Object.keys(patch).forEach(k => { m[k === "dias" ? "repetir" : k] = 1; });
+      return m;
+    });
+  };
+  const digitar = v => {
+    setTexto(v);
+    if (editando) { setF(prev => ({ ...prev, titulo: v })); return; }
+    const r = interpretarTexto(v, projetos, hoje);
+    setF(prev => {
+      const n = { ...prev, titulo: r.titulo };
+      if (!mexido.data) n.data = r.data || inicial.data || hoje;
+      if (!mexido.hora) n.hora = r.hora || "";
+      if (!mexido.duracao) n.duracao = r.duracao || 0;
+      if (!mexido.projId) n.projId = r.projId || "";
+      if (!mexido.repetir) { n.repetir = r.repetir || ""; n.dias = r.dias || []; }
+      return n;
+    });
+  };
+
+  const p = f.projId ? (projetos || []).find(x => x.projId === f.projId) : null;
+  const pode = !!((f.titulo || "").trim() || p);
+  const salvar = () => {
+    if (!pode) return;
+    onSalvar({
+      ...f,
+      titulo: (f.titulo || "").trim(),
+      duracao: Number(f.duracao) || 0,
+      esforco: p ? "" : f.esforco,
+      dias: f.repetir === "semanal" ? (f.dias || []) : []
+    });
+  };
+  const dataBR = iso => iso.slice(8, 10) + "/" + iso.slice(5, 7);
+  const labelData = f.data === hoje ? "hoje" : f.data === somaDias(hoje, 1) ? "amanhã"
+    : diaLocal(f.data).toLocaleDateString("pt-BR", { weekday: "short", day: "numeric", month: "short" }).replace(/\./g, "");
+
+  const chip = (ativo, label, onClick, key) => /*#__PURE__*/React.createElement("span", {
+    key: key || label,
+    onClick: onClick,
+    style: {
+      cursor: "pointer", fontSize: 12, padding: "6px 11px", borderRadius: 8, whiteSpace: "nowrap",
+      background: ativo ? "var(--lime-soft)" : "var(--bg-elev2)",
+      border: "1px solid " + (ativo ? "var(--lime)" : "var(--border-strong)"),
+      color: ativo ? "var(--lime)" : "var(--text-2)"
+    }
+  }, label);
+  const campo = (rotulo, conteudo) => /*#__PURE__*/React.createElement("div", { style: { marginTop: 14 } },
+    /*#__PURE__*/React.createElement("label", null, rotulo),
+    /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 6, flexWrap: "wrap", alignItems: "center" } }, conteudo));
+
+  return /*#__PURE__*/React.createElement("div", { className: "modal-bg", onClick: onClose },
+    /*#__PURE__*/React.createElement("div", { className: "modal", onClick: e => e.stopPropagation() },
+      /*#__PURE__*/React.createElement("div", { className: "row", style: { justifyContent: "space-between", marginBottom: 12 } },
+        /*#__PURE__*/React.createElement("span", { style: { fontSize: 16, fontWeight: 600 } }, editando ? "Editar compromisso" : "📅 Agendar"),
+        /*#__PURE__*/React.createElement("span", { onClick: onClose, style: { cursor: "pointer", color: "var(--text-3)", fontSize: 18 } }, "✕")),
+
+      /*#__PURE__*/React.createElement("input", {
+        value: texto,
+        autoFocus: true,
+        placeholder: editando ? "Título" : "Ex: violino amanhã 19h 30min",
+        onChange: e => digitar(e.target.value),
+        onKeyDown: e => { if (e.key === "Enter") salvar(); },
+        style: { fontSize: 15, padding: "11px 12px" }
+      }),
+      !editando && /*#__PURE__*/React.createElement("div", { style: { fontSize: 10.5, color: "var(--text-3)", marginTop: 6, lineHeight: 1.5 } },
+        "entende: hoje, amanhã, seg…dom, 15/09, 19h, 19:30, 30min, toda seg e qua, todo dia"),
+
+      // resumo do que foi entendido
+      /*#__PURE__*/React.createElement("div", {
+        style: { marginTop: 12, padding: "10px 12px", borderRadius: 10, background: "var(--bg-elev2)", border: "1px solid var(--border)", fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.5 }
+      },
+        /*#__PURE__*/React.createElement("b", { style: { color: "var(--text)" } },
+          (p ? (p.emoji || "📌") + " " : "📅 ") + ((f.titulo || "").trim() || (p ? p.projeto : "sem título"))),
+        " · " + labelData + (f.hora ? " às " + f.hora : "") + (f.duracao ? " · " + fmtDur(Number(f.duracao)) : "")
+          + (f.repetir ? " · 🔁 " + resumoRepetir(f) : "")),
+
+      campo("Quando", [
+        chip(f.data === hoje, "Hoje", () => muda({ data: hoje }), "hoje"),
+        chip(f.data === somaDias(hoje, 1), "Amanhã", () => muda({ data: somaDias(hoje, 1) }), "amanha"),
+        /*#__PURE__*/React.createElement("input", {
+          key: "data", type: "date", value: f.data,
+          onChange: e => e.target.value && muda({ data: e.target.value }),
+          style: { width: 150, padding: "6px 8px", fontSize: 12.5 }
+        })
+      ]),
+
+      campo("Horário e duração", [
+        /*#__PURE__*/React.createElement("input", {
+          key: "hora", type: "time", value: f.hora || "",
+          onChange: e => muda({ hora: e.target.value }),
+          style: { width: 110, padding: "6px 8px", fontSize: 12.5 }
+        }),
+        f.hora && chip(false, "sem horário", () => muda({ hora: "" }), "semhora"),
+        /*#__PURE__*/React.createElement("span", { key: "sep", style: { width: 6 } }),
+        ...[0, 15, 30, 60, 90].map(min => chip(Number(f.duracao) === min, min ? fmtDur(min) : "—", () => muda({ duracao: min }), "d" + min))
+      ]),
+
+      campo("Projeto", [
+        /*#__PURE__*/React.createElement("select", {
+          key: "proj", value: f.projId || "",
+          onChange: e => muda({ projId: e.target.value })
+        },
+          /*#__PURE__*/React.createElement("option", { value: "" }, "— avulso (não é de projeto) —"),
+          (projetos || []).map(x => /*#__PURE__*/React.createElement("option", { key: x.projId, value: x.projId }, (x.emoji || "📌") + " " + x.projeto)))
+      ]),
+
+      p
+        ? /*#__PURE__*/React.createElement("div", {
+            style: { marginTop: 10, padding: "9px 12px", borderRadius: 10, background: "var(--lime-soft)", fontSize: 12, color: "var(--lime)", lineHeight: 1.5 }
+          }, etapaVigente(p)
+            ? "🎯 marcar = uma passada em “" + etapaVigente(p).texto + "” · hoje vale +" + onCotar(p).gemas + " 💎"
+            : "⚠️ este projeto está sem próxima etapa — defina uma no ✎ para ele pagar 💎")
+        : campo("Recompensa", [
+            chip(!f.esforco, "Sem 💎", () => muda({ esforco: "" }), "sem"),
+            ...ESFORCOS.map(e => chip(f.esforco === e.id, e.nome + " · " + e.gemas + " 💎", () => muda({ esforco: e.id }), e.id))
+          ]),
+
+      campo("Repetir", REPETIR.map(r => chip((f.repetir || "") === r.id, r.nome, () => muda({ repetir: r.id }), "r" + r.id))),
+      f.repetir === "semanal" && /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 5, marginTop: 8 } },
+        DIAS_MINI.map((d, k) => {
+          const on = (f.dias || []).indexOf(k) !== -1;
+          return /*#__PURE__*/React.createElement("span", {
+            key: k, title: DIAS_CURTO[k],
+            onClick: () => muda({ dias: on ? f.dias.filter(x => x !== k) : [...(f.dias || []), k].sort((a, b) => a - b) }),
+            style: {
+              cursor: "pointer", width: 30, height: 30, borderRadius: "50%",
+              display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 11.5, fontWeight: 600,
+              background: on ? "var(--lime)" : "transparent",
+              border: "1px solid " + (on ? "var(--lime)" : "var(--border-strong)"),
+              color: on ? "#0b0f0c" : "var(--text-3)"
+            }
+          }, d);
+        })),
+
+      /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 8, marginTop: 20, flexWrap: "wrap" } },
+        /*#__PURE__*/React.createElement("button", {
+          className: "btn btn-primary",
+          style: { flex: 1, justifyContent: "center", opacity: pode ? 1 : .45, minWidth: 120 },
+          onClick: salvar
+        }, editando ? "Salvar" : "Agendar"),
+        editando && base.repetir && /*#__PURE__*/React.createElement("button", {
+          className: "btn",
+          onClick: () => { if (confirm("Apagar só o dia " + dataBR(inicial.dia) + "?")) onExcluir(base, inicial.dia); }
+        }, "Apagar só " + dataBR(inicial.dia)),
+        editando && /*#__PURE__*/React.createElement("button", {
+          className: "btn",
+          style: { borderColor: "var(--danger)", color: "var(--danger)" },
+          onClick: () => { if (confirm(base.repetir ? "Apagar todas as repetições?" : "Apagar este compromisso?")) onExcluir(base, null); }
+        }, base.repetir ? "Apagar todos" : "Excluir"))));
 }
 
 /* ============ AVISO: ETAPA FINALIZADA ============ */
@@ -2672,7 +3132,7 @@ function EtapaEditorRow({ et, i, total, onPatch, onMove, onDel }) {
 }
 
 /* ============ SELETOR DE RECORRENCIA DO PROJETO ============ */
-function RecorrenciaProjeto({ rec, dias, diaMes, onChange }) {
+function RecorrenciaProjeto({ rec, dias, diaMes, hora, onChange }) {
   const ds = dias || [];
   const toggle = d => onChange({ dias: ds.indexOf(d) !== -1 ? ds.filter(x => x !== d) : [...ds, d].sort((a,b)=>a-b) });
   return /*#__PURE__*/React.createElement("div", { style: { marginBottom: 16 } },
@@ -2718,7 +3178,19 @@ function RecorrenciaProjeto({ rec, dias, diaMes, onChange }) {
         style: { width: 70, textAlign: "center", padding: "7px 4px", fontSize: 12.5 }
       }),
       /*#__PURE__*/React.createElement("span", { style: { fontSize: 10.5, color: "var(--text-3)" } },
-        "em branco = qualquer dia")));
+        "em branco = qualquer dia")),
+
+    rec && /*#__PURE__*/React.createElement("div", {
+      className: "row", style: { marginTop: 9, gap: 8, alignItems: "center" }
+    },
+      /*#__PURE__*/React.createElement("span", { style: { fontSize: 11.5, color: "var(--text-3)", flex: "none" } }, "horário:"),
+      /*#__PURE__*/React.createElement("input", {
+        type: "time", value: hora || "",
+        onChange: e => onChange({ hora: e.target.value }),
+        style: { width: 110, padding: "7px 8px", fontSize: 12.5 }
+      }),
+      /*#__PURE__*/React.createElement("span", { style: { fontSize: 10.5, color: "var(--text-3)" } },
+        hora ? "aparece às " + hora + " nos check-ins" : "em branco = sem horário")));
 }
 
 /* ============ OVERLAY DE ABERTURA: PUXAR DA NUVEM ============
@@ -2790,11 +3262,11 @@ function CarteiraModal({ log, carteira, saldo, liberado, agora, onComprar, onEme
       /*#__PURE__*/React.createElement("div", { style: { marginTop: 14 } },
         /*#__PURE__*/React.createElement("div", {
           className: "row", style: { justifyContent: "space-between", fontSize: 11, color: "var(--text-3)", marginBottom: 5 }
-        }, /*#__PURE__*/React.createElement("span", null, "ganho hoje"),
-          /*#__PURE__*/React.createElement("span", null, ganhoHoje + " / " + ECON.tetoDia + " 💎")),
+        }, /*#__PURE__*/React.createElement("span", null, "ganho hoje +" + ganhoHoje + " 💎"),
+          /*#__PURE__*/React.createElement("span", null, "carteira " + Math.max(0, saldo) + " / " + ECON.carteiraMax + " 💎")),
         /*#__PURE__*/React.createElement("div", { style: { height: 5, background: "var(--bg-elev2)", borderRadius: 4, overflow: "hidden" } },
           /*#__PURE__*/React.createElement("div", {
-            style: { width: Math.min(100, ganhoHoje / ECON.tetoDia * 100) + "%", height: "100%", background: "var(--lime)" }
+            style: { width: Math.min(100, Math.max(0, saldo) / ECON.carteiraMax * 100) + "%", height: "100%", background: "var(--lime)" }
           }))),
 
       // estado dos jogos
@@ -2867,110 +3339,127 @@ function CarteiraModal({ log, carteira, saldo, liberado, agora, onComprar, onEme
             }, (m.val > 0 ? "+" : "") + m.val)))));
 }
 
-function CalendarioView({ projetos, log }) {
-  const [mes, setMes] = useState(() => { const d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d; });
-  const [diaSel, setDiaSel] = useState(new Date().toISOString().slice(0,10));
+function CalendarioView({ projetos, rotinas, agenda, log, onTick, onAbrir, onCotar, onCotarAvulsa, onNovo }) {
+  const hoje = todayISO();
+  const [mes, setMes] = useState(() => hoje.slice(0, 7)); // "yyyy-mm"
+  const [diaSel, setDiaSel] = useState(hoje);
 
-  // agrupa os eventos do Log por dia
-  const porDia = useMemo(() => {
-    const m = {};
-    (log || []).forEach(ev => {
-      const d = String(ev.data || "").slice(0,10);
-      if (!d) return;
-      (m[d] = m[d] || []).push(ev);
-    });
-    return m;
-  }, [log]);
-
-  // mapa etapa -> é semanal?
-  const semanais = useMemo(() => {
-    const m = {};
-    (projetos || []).forEach(p => (p.etapas||[]).forEach(e => {
-      if (e.semanal) m[p.projeto + "|" + e.texto] = true;
-    }));
-    return m;
-  }, [projetos]);
-
-  const ano = mes.getFullYear(), mesNum = mes.getMonth();
-  const primeiro = new Date(ano, mesNum, 1);
-  const offset = (primeiro.getDay() + 6) % 7;          // segunda = 0
-  const diasNoMes = new Date(ano, mesNum + 1, 0).getDate();
-  const hoje = new Date().toISOString().slice(0,10);
-  const nomeMes = mes.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
-
+  const ano = Number(mes.slice(0, 4)), mesNum = Number(mes.slice(5, 7)) - 1;
+  const primeiro = mes + "-01";
+  const offset = idxDia(primeiro); // segunda = 0
+  const nomeMes = new Date(ano, mesNum, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
   const celulas = [];
   for (let i = 0; i < offset; i++) celulas.push(null);
-  for (let d = 1; d <= diasNoMes; d++)
-    celulas.push(new Date(ano, mesNum, d).toISOString().slice(0,10));
+  for (let d = 1; d <= diasNoMesDe(primeiro); d++) celulas.push(mes + "-" + String(d).padStart(2, "0"));
 
-  const eventosDoDia = porDia[diaSel] || [];
-  const totalMes = celulas.filter(Boolean).reduce((a,d) => a + (porDia[d]||[]).length, 0);
-  const diasAtivos = celulas.filter(d => d && (porDia[d]||[]).length).length;
+  // previstos x feitos por dia (rotinas ficam fora: apareceriam em todos os dias)
+  const resumo = useMemo(() => {
+    const m = {};
+    celulas.forEach(d => {
+      if (!d) return;
+      const ent = agendaDoDia(d, projetos, [], agenda, log);
+      m[d] = {
+        prev: ent.length,
+        feitos: ent.filter(e => e.feita).length,
+        log: (log || []).filter(ev => ev.data === d).length
+      };
+    });
+    return m;
+  }, [mes, projetos, agenda, log]);
 
-  const mudarMes = (n) => { const d = new Date(mes); d.setMonth(d.getMonth() + n); setMes(d); };
+  const doMes = celulas.filter(Boolean).map(d => resumo[d]);
+  const prevMes = doMes.reduce((s, r) => s + r.prev, 0);
+  const feitosMes = doMes.reduce((s, r) => s + r.feitos, 0);
+  const diasAtivos = doMes.filter(r => r.log > 0).length;
+
+  const mudarMes = n => {
+    const d = new Date(ano, mesNum + n, 1);
+    setMes(d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"));
+  };
+
+  const entradas = agendaDoDia(diaSel, projetos, rotinas, agenda, log);
+  const naLista = {};
+  entradas.forEach(e => { if (e.p) naLista[e.p.projeto] = true; });
+  // passadas de projetos sem recorrência não estão na agenda, mas foram feitas
+  const extras = (log || []).filter(ev => ev.data === diaSel && !ev.agendaId && !naLista[ev.projeto]);
+  const labelDia = (() => {
+    const t = diaLocal(diaSel).toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
+    return diaSel === hoje ? t + " · hoje" : t;
+  })();
 
   return /*#__PURE__*/React.createElement("div", { className: "fade" },
-    // cabeçalho do mês
-    /*#__PURE__*/React.createElement("div", { className: "row", style: { justifyContent:"space-between", marginBottom:12 } },
-      /*#__PURE__*/React.createElement("span", { onClick: () => mudarMes(-1),
-        style: { cursor:"pointer", color:"var(--text-2)", fontSize:18, padding:"2px 10px" } }, "\u2039"),
-      /*#__PURE__*/React.createElement("span", { style: { fontSize:15, fontWeight:600, textTransform:"capitalize" } }, nomeMes),
-      /*#__PURE__*/React.createElement("span", { onClick: () => mudarMes(1),
-        style: { cursor:"pointer", color:"var(--text-2)", fontSize:18, padding:"2px 10px" } }, "\u203A")),
+    /*#__PURE__*/React.createElement("div", { className: "row", style: { justifyContent: "space-between", marginBottom: 12 } },
+      /*#__PURE__*/React.createElement("span", {
+        onClick: () => mudarMes(-1), style: { cursor: "pointer", color: "var(--text-2)", fontSize: 18, padding: "2px 10px" }
+      }, "‹"),
+      /*#__PURE__*/React.createElement("span", { style: { fontSize: 15, fontWeight: 600, textTransform: "capitalize" } }, nomeMes),
+      /*#__PURE__*/React.createElement("span", {
+        onClick: () => mudarMes(1), style: { cursor: "pointer", color: "var(--text-2)", fontSize: 18, padding: "2px 10px" }
+      }, "›")),
 
-    // resumo
-    /*#__PURE__*/React.createElement("div", { style: { fontSize:12, color:"var(--text-3)", marginBottom:10 } },
-      diasAtivos + " dia(s) com avanço \u00B7 " + totalMes + " passada(s) no m\u00EAs"),
+    /*#__PURE__*/React.createElement("div", { style: { fontSize: 12, color: "var(--text-3)", marginBottom: 10 } },
+      feitosMes + " de " + prevMes + " compromisso(s) feitos · " + diasAtivos + " dia(s) com avanço"),
 
-    // cabeçalho dos dias da semana
-    /*#__PURE__*/React.createElement("div", { style: { display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4, marginBottom:4 } },
-      ["S","T","Q","Q","S","S","D"].map((d,i) =>
-        /*#__PURE__*/React.createElement("div", { key:i,
-          style:{ textAlign:"center", fontSize:10, color:"var(--text-3)" } }, d))),
+    /*#__PURE__*/React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4, marginBottom: 4 } },
+      DIAS_MINI.map((d, i) => /*#__PURE__*/React.createElement("div", {
+        key: i, style: { textAlign: "center", fontSize: 10, color: "var(--text-3)" }
+      }, d))),
 
-    // grade do mês
-    /*#__PURE__*/React.createElement("div", { style: { display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:4 } },
-      celulas.map((d,i) => {
-        if (!d) return /*#__PURE__*/React.createElement("div", { key:"v"+i });
-        const n = (porDia[d]||[]).length;
-        const sel = d === diaSel, ehHoje = d === hoje;
-        const intensidade = n === 0 ? 0 : Math.min(1, 0.25 + n * 0.2);
+    /*#__PURE__*/React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4 } },
+      celulas.map((d, i) => {
+        if (!d) return /*#__PURE__*/React.createElement("div", { key: "v" + i });
+        const r = resumo[d];
+        const sel = d === diaSel, ehHoje = d === hoje, passado = d <= hoje;
+        const razao = r.prev ? r.feitos / r.prev : 0;
+        const forte = passado && r.prev > 0 && razao === 1;
+        const bg = passado && r.feitos > 0 ? "rgba(127,216,88," + (0.18 + 0.55 * razao) + ")"
+          : passado && r.prev === 0 && r.log > 0 ? "rgba(127,216,88,.18)" : "var(--card)";
+        const marca = r.prev ? r.feitos + "/" + r.prev : r.log ? "✓" + r.log : "";
+        const corMarca = forte ? "#0b0f0c" : passado && r.prev && r.feitos < r.prev && d < hoje ? "var(--warn)" : "var(--text-3)";
         return /*#__PURE__*/React.createElement("div", {
           key: d,
           onClick: () => setDiaSel(d),
           style: {
-            aspectRatio: "1",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            flexDirection: "column",
-            borderRadius: 8,
-            cursor: "pointer",
-            background: n ? "rgba(127,216,88," + intensidade + ")" : "var(--card)",
+            aspectRatio: "1", maxWidth: "100%", display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", gap: 1, borderRadius: 8, cursor: "pointer",
+            background: bg,
             border: sel ? "2px solid var(--lime)" : ehHoje ? "1px solid var(--warn)" : "1px solid var(--border)",
-            color: n > 2 ? "#0b0f0c" : "var(--text-2)",
-            fontSize: 12, fontWeight: n ? 700 : 400
+            color: forte ? "#0b0f0c" : "var(--text-2)", fontSize: 12, fontWeight: r.prev || r.log ? 700 : 400
           }
         },
-          /*#__PURE__*/React.createElement("span", null, Number(d.slice(8,10))),
-          n > 0 && /*#__PURE__*/React.createElement("span", { style:{ fontSize:8, opacity:.85 } }, n));
+          /*#__PURE__*/React.createElement("span", null, Number(d.slice(8, 10))),
+          marca && /*#__PURE__*/React.createElement("span", { style: { fontSize: 8.5, color: corMarca, fontWeight: 600 } }, marca));
       })),
 
-    // detalhe do dia escolhido
-    /*#__PURE__*/React.createElement("div", { style: { marginTop:16 } },
-      /*#__PURE__*/React.createElement("div", { style:{ fontSize:12, color:"var(--text-3)", marginBottom:8 } },
-        diaSel.split("-").reverse().join("/") + (diaSel === hoje ? " \u00B7 hoje" : "")),
-      eventosDoDia.length === 0
-        ? /*#__PURE__*/React.createElement("div", { style:{ fontSize:13, color:"var(--text-3)", padding:"10px 0" } },
-            "nenhuma passada registrada neste dia")
-        : eventosDoDia.map((ev,i) =>
-            /*#__PURE__*/React.createElement("div", { key:i,
-              style:{ background:"var(--card)", border:"1px solid var(--border)", borderRadius:10,
-                      padding:"9px 12px", marginBottom:6 } },
-              /*#__PURE__*/React.createElement("div", { className:"row", style:{ justifyContent:"space-between" } },
-                /*#__PURE__*/React.createElement("span", { style:{ fontSize:13, fontWeight:600 } }, ev.projeto),
-                semanais[ev.projeto + "|" + ev.etapa] &&
-                  /*#__PURE__*/React.createElement("span", { style:{ fontSize:10, color:"var(--warn)" } }, "\uD83D\uDD01 semanal")),
-              /*#__PURE__*/React.createElement("div", { style:{ fontSize:12, color:"var(--lime)", marginTop:3 } }, "\u2713 " + ev.etapa),
-              /*#__PURE__*/React.createElement("div", { style:{ fontSize:10, color:"var(--text-3)", marginTop:3 } }, ev.categoria))))
+    /*#__PURE__*/React.createElement("div", { style: { marginTop: 18 } },
+      /*#__PURE__*/React.createElement("div", { className: "row", style: { justifyContent: "space-between", marginBottom: 10, gap: 8 } },
+        /*#__PURE__*/React.createElement("span", { style: { fontSize: 14, fontWeight: 600, textTransform: "capitalize" } }, labelDia),
+        /*#__PURE__*/React.createElement("button", {
+          className: "btn btn-sm", style: { flex: "none" }, onClick: () => onNovo(diaSel)
+        }, "＋ agendar")),
+
+      entradas.length > 0
+        ? /*#__PURE__*/React.createElement(DiaAgenda, {
+            dia: diaSel, entradas: entradas, log: log,
+            onTick: onTick, onAbrir: onAbrir, onCotar: onCotar, onCotarAvulsa: onCotarAvulsa
+          })
+        : /*#__PURE__*/React.createElement("div", { style: { fontSize: 13, color: "var(--text-3)", padding: "8px 0" } },
+            "nada agendado neste dia"),
+
+      extras.length > 0 && /*#__PURE__*/React.createElement("div", { style: { marginTop: 14 } },
+        /*#__PURE__*/React.createElement("div", {
+          style: { fontSize: 10.5, color: "var(--text-3)", marginBottom: 6, textTransform: "uppercase", letterSpacing: .5 }
+        }, "também registrado"),
+        extras.map((ev, i) => /*#__PURE__*/React.createElement("div", {
+          key: i, className: "row",
+          style: { gap: 10, background: "var(--card)", border: "1px solid var(--border)", borderRadius: 10, padding: "9px 12px", marginBottom: 6 }
+        },
+          /*#__PURE__*/React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+            /*#__PURE__*/React.createElement("div", { style: { fontSize: 13, fontWeight: 600 } }, ev.projeto),
+            /*#__PURE__*/React.createElement("div", { style: { fontSize: 12, color: "var(--lime)", marginTop: 2 } }, "✓ " + ev.etapa)),
+          (ev.gemas || 0) + (ev.bonus || 0) > 0 && /*#__PURE__*/React.createElement("span", {
+            style: { fontSize: 12, fontWeight: 700, color: "var(--done-text)", flex: "none" }
+          }, "+" + ((ev.gemas || 0) + (ev.bonus || 0)) + " 💎")))))
   );
 }
 
@@ -3279,10 +3768,12 @@ function EditorModal({
   const [rec, setRec] = useState(isNew ? "" : recorrenciaDe(editing));
   const [dias, setDias] = useState(isNew ? [] : (editing.dias || []));
   const [diaMes, setDiaMes] = useState(isNew ? 0 : Number(editing.diaMes || 0));
+  const [hora, setHora] = useState(isNew ? "" : editing.hora || "");
   const patchRec = patch => {
     if ("recorrencia" in patch) setRec(patch.recorrencia);
     if ("dias" in patch) setDias(patch.dias);
     if ("diaMes" in patch) setDiaMes(patch.diaMes);
+    if ("hora" in patch) setHora(patch.hora);
   };
   const [etapas, setEtapas] = useState(isNew ? [{
     texto: "",
@@ -3321,6 +3812,7 @@ function EditorModal({
       recorrencia: isRotina ? "" : rec,
       dias: rec === "semanal" ? dias : [],
       diaMes: rec === "mensal" ? Math.max(0, Math.min(31, parseInt(diaMes) || 0)) : 0,
+      hora: isRotina || !rec ? "" : hora,
       favorito: !isNew ? editing.favorito : false,
       ultimoAvanco: !isNew ? editing.ultimoAvanco : "",
       etapas: etapasClean.map((et, i) => {
@@ -3489,6 +3981,7 @@ function EditorModal({
     rec: rec,
     dias: dias,
     diaMes: diaMes,
+    hora: hora,
     onChange: patchRec
   }), !isRotina && /*#__PURE__*/React.createElement("div", {
     style: {
