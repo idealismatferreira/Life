@@ -593,9 +593,115 @@ function arquivarConcluidas(projects, log) {
   });
 }
 
+/* ============ ECONOMIA DE GEMAS 💎 ============
+   Tarefas árduas geram 💎; jogos custam 💎.
+   O valor pago fica gravado em cada evento do Log (gemas/bonus) e cada
+   compra fica na Carteira — o saldo é sempre derivado, e desfazer estorna exato. */
+const ESFORCOS = [
+  { id: "leve",   nome: "Leve",   gemas: 10, dica: "~15–20 min" },
+  { id: "media",  nome: "Média",  gemas: 20, dica: "~30–45 min" },
+  { id: "pesada", nome: "Pesada", gemas: 35, dica: "60+ min" }
+];
+const ECON = {
+  tetoDia: 120,          // 💎 ganhos por dia em passadas (bônus de etapa fica fora)
+  carteiraMax: 300,      // acima disso não acumula
+  passadasPagasDia: 2,   // por projeto; as seguintes contam progresso, mas pagam 0
+  multTeto: 2,
+  multPorFalta: 0.25,    // recorrentes: por dia previsto que ficou sem check-in
+  multPorDia: 0.1,       // sem recorrência: por dia parado além da carência
+  carenciaDias: 3,
+  janelaDias: 60,        // quanto para trás o multiplicador olha
+  precoMin: 1,           // 💎 por minuto de jogo
+  pacotes: [15, 30, 60],
+  emergenciaMin: 30,     // 1x por semana; pode deixar o saldo negativo
+  pausaMaxDias: 7
+};
+const esforcoDe = p => p.tipo === "Rotina" ? ESFORCOS[0] : (ESFORCOS.find(e => e.id === p.esforco) || ESFORCOS[1]);
+const emPausa = (pausas, iso) => (pausas || []).some(pa => iso >= pa.inicio && iso <= pa.fim);
+const dataLocalDe = isoDataHora => isoLocal(new Date(isoDataHora));
+
+// ultimo dia com check-in do projeto ANTES de `dia`
+function ultimoCheckinAntes(log, projeto, dia) {
+  let u = "";
+  (log || []).forEach(ev => { if (ev.projeto === projeto && ev.data < dia && ev.data > u) u = ev.data; });
+  return u;
+}
+
+/* Multiplicador de falta de uma passada feita em `dia`.
+   So vale na 1a passada do dia no projeto; dias em pausa nao contam. */
+function multFalta(p, log, dia, pausas) {
+  if (feitoNoDia(log, p.projeto, dia) > 0) return 1;
+  const ultimo = ultimoCheckinAntes(log, p.projeto, dia);
+  if (!ultimo) return 1; // projeto sem historico: nada esta "em falta" ainda
+  const limite = somaDias(dia, -ECON.janelaDias);
+  const inicio = somaDias(ultimo > limite ? ultimo : limite, 1);
+  const rotinaDiaria = p.tipo === "Rotina" && p.rotinaFreq !== "Semanal";
+  const regra = rotinaDiaria ? { recorrencia: "diaria" } : p;
+  let m;
+  if (p.tipo === "Rotina" ? rotinaDiaria : ehRecorrente(p)) {
+    let faltas = 0;
+    for (let d = inicio; d < dia; d = somaDias(d, 1))
+      if (previstoNoDia(regra, d) && !emPausa(pausas, d)) faltas++;
+    m = 1 + ECON.multPorFalta * faltas;
+  } else {
+    let parados = 0;
+    for (let d = inicio; d <= dia; d = somaDias(d, 1))
+      if (!emPausa(pausas, d)) parados++;
+    m = 1 + ECON.multPorDia * Math.max(0, parados - ECON.carenciaDias);
+  }
+  return Math.min(ECON.multTeto, Math.round(m * 100) / 100);
+}
+
+const ganhoNoDia = (log, dia) => (log || []).reduce((s, ev) => s + (ev.data === dia ? (ev.gemas || 0) : 0), 0);
+const saldoGemas = (log, carteira) =>
+  (log || []).reduce((s, ev) => s + (ev.gemas || 0) + (ev.bonus || 0), 0)
+  - (carteira || []).reduce((s, c) => s + (c.gemas || 0), 0);
+
+// quanto uma passada em `dia` paga — multiplicador + todos os tetos
+function cotarPassada(p, log, carteira, dia, pausas) {
+  const base = esforcoDe(p).gemas;
+  const mult = multFalta(p, log, dia, pausas);
+  const nominal = Math.round(base * mult);
+  if (feitoNoDia(log, p.projeto, dia) >= ECON.passadasPagasDia)
+    return { base, mult, nominal, gemas: 0, motivo: ECON.passadasPagasDia + " passadas pagas hoje" };
+  const restDia = Math.max(0, ECON.tetoDia - ganhoNoDia(log, dia));
+  const restCarteira = Math.max(0, ECON.carteiraMax - saldoGemas(log, carteira));
+  const gemas = Math.min(nominal, restDia, restCarteira);
+  const motivo = gemas >= nominal ? "" : restDia <= restCarteira ? "teto diário" : "carteira cheia";
+  return { base, mult, nominal, gemas, motivo };
+}
+
+/* Carteira: { id, criadoEm, tipo: "jogo"|"emergencia"|"pausa", minutos, gemas, inicio, fim }
+   jogo/emergencia usam data-hora ISO; pausa usa yyyy-mm-dd. */
+const pausasDe = carteira => (carteira || []).filter(c => c.tipo === "pausa");
+const ehDesbloqueio = c => c.tipo === "jogo" || c.tipo === "emergencia";
+
+// ate quando os jogos estao liberados (encadeia compras seguidas); null = travado
+function liberadoAte(carteira, agora) {
+  const t = agora || Date.now();
+  const lib = (carteira || []).filter(ehDesbloqueio);
+  let fim = t, mudou = true;
+  while (mudou) {
+    mudou = false;
+    lib.forEach(c => {
+      const a = new Date(c.inicio).getTime(), b = new Date(c.fim).getTime();
+      if (a <= fim && b > fim) { fim = b; mudou = true; }
+    });
+  }
+  return fim > t ? fim : null;
+}
+const emergenciaNaSemana = (carteira, hoje) => (carteira || []).some(c =>
+  c.tipo === "emergencia" && chaveSemanaISO(dataLocalDe(c.criadoEm)) === chaveSemanaISO(hoje));
+
 /* Migracao: versoes antigas guardavam recorrencia por etapa e nao tinham
    data de conclusao. Sobe a recorrencia pro projeto e deduz a data pelo Log. */
-const normalizarLog = log => (log || []).map(ev => ({ ...ev, data: normISO(ev.data) })).filter(ev => ev.data);
+const normalizarLog = log => (log || []).map(ev => ({
+  ...ev,
+  data: normISO(ev.data),
+  gemas: Number(ev.gemas || 0),
+  mult: Number(ev.mult || 1),
+  bonus: Number(ev.bonus || 0)
+})).filter(ev => ev.data);
 
 function migrarProjetos(projects, log) {
   const ultimo = {};
@@ -606,6 +712,7 @@ function migrarProjetos(projects, log) {
   return (projects || []).map(p => {
     const np = { ...p };
     np.ultimoAvanco = normISO(p.ultimoAvanco);
+    np.esforco = p.esforco || (p.tipo === "Rotina" ? "leve" : "media");
     if (!recorrenciaDe(np)) {
       const fonte = (p.etapas || []).find(e => ehRecorrente(e));
       if (fonte) {
@@ -646,6 +753,7 @@ function rowsToProjects(rows) {
         favorito: !!r.favorito,
         ultimoAvanco: normISO(r.ultimoAvanco),
         escola: r.escola || "",
+        esforco: r.esforco || "",
         recorrencia: "",
         dias: [],
         diaMes: 0,
@@ -699,6 +807,7 @@ function projectsToRows(projects) {
         concluida: false,
         concluidaEm: "",
         escola: p.escola || "",
+        esforco: p.esforco || "",
         semanal: recorrenciaDe(p) === "semanal",
         recorrencia: recorrenciaDe(p),
         dias: (p.dias || []).join(","),
@@ -724,6 +833,7 @@ function projectsToRows(projects) {
         concluida: e.concluida,
         concluidaEm: e.concluidaEm || "",
         escola: p.escola || "",
+        esforco: p.esforco || "",
         semanal: recorrenciaDe(p) === "semanal",
         recorrencia: recorrenciaDe(p),
         dias: (p.dias || []).join(","),
@@ -759,6 +869,19 @@ function App() {
   const [editing, setEditing] = useState(null); // projeto em edição ou "new"
   const [view, setView] = useState("home"); // home | checkins | progresso | calendario
   const [aviso, setAviso] = useState(null); // {projId, projeto, etapa} -> modal "etapa concluida"
+  const [carteira, setCarteira] = useState([]); // compras de jogo, emergências e pausas
+  const [carteiraAberta, setCarteiraAberta] = useState(false);
+  const [toast, setToast] = useState(null); // {txt, id} -> "+20 💎"
+  const [agora, setAgora] = useState(Date.now()); // relógio p/ contagem do desbloqueio
+  useEffect(() => {
+    const t = setInterval(() => setAgora(Date.now()), 15000);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2800);
+    return () => clearTimeout(t);
+  }, [toast]);
   const dirty = useRef(false);
   const pushTimer = useRef(null);
   const firstSave = useRef(true);
@@ -774,6 +897,7 @@ function App() {
         setProjects(arquivarConcluidas(resetRotinas(migrados), logSalvo));
         setLog(logSalvo);
         setOrdemCat(data.ordemCat || []);
+        setCarteira(data.carteira || []);
       } catch (e) {}
     }
     setLoaded(true);
@@ -786,10 +910,11 @@ function App() {
       projects,
       log,
       ordemCat,
+      carteira,
       savedAt: Date.now()
     }));
     dirty.current = true;
-  }, [projects, log, ordemCat, loaded]);
+  }, [projects, log, ordemCat, carteira, loaded]);
 
   // Auto-push pro Sheets (debounce 2s após a última mudança)
   useEffect(() => {
@@ -811,6 +936,10 @@ function App() {
           action: "syncLog",
           log: log
         });
+        await apiCall({
+          action: "syncCarteira",
+          carteira: carteira
+        });
         dirty.current = false;
         setAutoState("ok");
         setTimeout(() => setAutoState("idle"), 1500);
@@ -821,7 +950,7 @@ function App() {
     return () => {
       if (pushTimer.current) clearTimeout(pushTimer.current);
     };
-  }, [projects, log, loaded]);
+  }, [projects, log, carteira, loaded]);
 
   /* Rotinas voltam ao zero quando vira o dia (ou a semana). */
 function resetRotinas(list) {
@@ -842,6 +971,17 @@ function resetRotinas(list) {
   }
   const projetos = useMemo(() => projects.filter(p => p.tipo === "Projeto"), [projects]);
   const rotinas = useMemo(() => projects.filter(p => p.tipo === "Rotina"), [projects]);
+  const pausas = useMemo(() => pausasDe(carteira), [carteira]);
+  const saldo = useMemo(() => saldoGemas(log, carteira), [log, carteira]);
+  const liberado = liberadoAte(carteira, agora);
+  const cotar = (p, dia) => cotarPassada(p, log, carteira, dia || todayISO(), pausas);
+  function avisarGemas(cot, bonus) {
+    let txt = cot.gemas > 0 ? "+" + cot.gemas + " 💎" : "0 💎";
+    if (cot.gemas > 0 && cot.mult > 1 && !cot.motivo) txt += " · resgate de projeto em falta";
+    if (cot.motivo) txt += " · " + cot.motivo;
+    if (bonus > 0) txt += " · +" + bonus + " bônus de etapa";
+    setToast({ txt, id: uid() });
+  }
   const favoritos = useMemo(() => projetos.filter(p => p.favorito), [projetos]);
   const porCategoria = useMemo(() => {
     const g = {};
@@ -968,18 +1108,27 @@ function resetRotinas(list) {
       const ant = normISO(p.ultimoAvanco);
       return { ...p, etapas, ultimoAvanco: dia > ant ? dia : ant };
     }));
+    const cot = cotar(target, dia);
+    // bônus de etapa: 1x a base, fora do teto diário, mas respeita a carteira máxima
+    const bonus = fechou ? Math.max(0, Math.min(esforcoDe(target).gemas,
+      ECON.carteiraMax - (saldo + cot.gemas))) : 0;
     setLog(prev => [...prev, {
       data: dia,
       projeto: target.projeto,
       categoria: target.categoria,
-      etapa: alvo.texto
+      etapa: alvo.texto,
+      gemas: cot.gemas,
+      mult: cot.mult,
+      bonus
     }]);
+    avisarGemas(cot, bonus);
     if (fechou) setAviso({
       projId: target.projId,
       projeto: target.projeto,
       emoji: target.emoji,
       etapa: alvo.texto,
       meta: meta,
+      bonus,
       restantes: etapas0.filter((e, k) => k !== next && !e.concluida).length
     });
   }
@@ -1021,12 +1170,17 @@ function resetRotinas(list) {
         setLog(log.filter((_, k) => k !== real));
       }
     } else {
+      const cot = cotar(target, dataISO);
       setLog(prev => [...prev, {
         data: dataISO,
         categoria: target.categoria,
         projeto: target.projeto,
-        etapa: target.projeto
+        etapa: target.projeto,
+        gemas: cot.gemas,
+        mult: cot.mult,
+        bonus: 0
       }]);
+      avisarGemas(cot, 0);
     }
     if (dataISO === hoje) {
       setProjects(prev => prev.map(p => p !== target ? p : {
@@ -1097,6 +1251,40 @@ function resetRotinas(list) {
   function toggleRotina(target) {
     checkinRotina(target, todayISO());
   }
+
+  /* ---- CARTEIRA ---- */
+  // compra minutos de jogo; se já houver desbloqueio, emenda no fim dele
+  function comprarJogo(minutos, emergencia) {
+    const custo = emergencia ? ECON.emergenciaMin * ECON.precoMin : minutos * ECON.precoMin;
+    if (emergencia ? emergenciaNaSemana(carteira, todayISO()) : saldo < custo) return;
+    const mins = emergencia ? ECON.emergenciaMin : minutos;
+    const inicioMs = liberadoAte(carteira) || Date.now();
+    setCarteira(prev => [...prev, {
+      id: uid(),
+      criadoEm: new Date().toISOString(),
+      tipo: emergencia ? "emergencia" : "jogo",
+      minutos: mins,
+      gemas: custo,
+      inicio: new Date(inicioMs).toISOString(),
+      fim: new Date(inicioMs + mins * 60000).toISOString()
+    }]);
+    setAgora(Date.now());
+  }
+  // pausa (doença/viagem): dias em pausa não contam como falta
+  function pausar(dias) {
+    const hoje = todayISO();
+    const n = Math.max(1, Math.min(ECON.pausaMaxDias, parseInt(dias) || 1));
+    setCarteira(prev => [...prev, {
+      id: uid(), criadoEm: new Date().toISOString(), tipo: "pausa",
+      minutos: 0, gemas: 0, inicio: hoje, fim: somaDias(hoje, n - 1)
+    }]);
+  }
+  function encerrarPausa() {
+    const hoje = todayISO();
+    setCarteira(prev => prev
+      .filter(c => !(c.tipo === "pausa" && c.inicio === hoje))
+      .map(c => c.tipo === "pausa" && c.inicio < hoje && c.fim >= hoje ? { ...c, fim: somaDias(hoje, -1) } : c));
+  }
   function saveEdited(proj, isNew) {
     if (isNew) setProjects(prev => [...prev, proj]);else setProjects(prev => prev.map(p => proj.projId && p.projId === proj.projId || p === editing.ref ? proj : p));
     setEditing(null);
@@ -1122,11 +1310,15 @@ function resetRotinas(list) {
       const rl = await apiCall({
         action: "getLog"
       });
+      const rc = await apiCall({
+        action: "getCarteira"
+      });
       if (r.ok) {
         const logNuvem = (rl.ok && rl.log) ? normalizarLog(rl.log) : [];
         const migrados2 = migrarProjetos(rowsToProjects(r.rows), logNuvem);
         setProjects(arquivarConcluidas(resetRotinas(migrados2), logNuvem));
         if (rl.ok) setLog(logNuvem);
+        if (rc.ok) setCarteira(rc.carteira || []);
         firstSave.current = true; // não re-empurra logo após puxar
         setPullReminder(false); // já puxou, pode mexer
         setSyncState("ok");
@@ -1147,7 +1339,11 @@ function resetRotinas(list) {
     hasApi: !!API_URL,
     view: view,
     setView: setView,
-    pullReminder: pullReminder
+    pullReminder: pullReminder,
+    saldo: saldo,
+    liberado: liberado,
+    agora: agora,
+    onCarteira: () => setCarteiraAberta(true)
   }), view === "checkins" ? /*#__PURE__*/React.createElement(CheckinsView, {
     projetos: projetos,
     rotinas: rotinas,
@@ -1155,7 +1351,8 @@ function resetRotinas(list) {
     onCheckin: avancar,
     onDesfazer: desfazerCheckin,
     onCheckinRotina: checkinRotina,
-    onEdit: p => setEditing({ ref: p, ...p })
+    onEdit: p => setEditing({ ref: p, ...p }),
+    onCotar: cotar
   }) : view === "calendario" ? /*#__PURE__*/React.createElement(CalendarioView, {
     projetos: projetos,
     log: log
@@ -1218,6 +1415,7 @@ function resetRotinas(list) {
         onRemove: removeProject,
         onMover: moverProjeto,
         onMoverCat: moverCategoria,
+        onCotar: cotar,
         catFirst: ci === 0,
         catLast: ci === cats.length - 1
       });
@@ -1241,7 +1439,27 @@ function resetRotinas(list) {
       setAviso(null);
     },
     onFechar: () => setAviso(null)
-  }), editing && /*#__PURE__*/React.createElement(EditorModal, {
+  }), carteiraAberta && /*#__PURE__*/React.createElement(CarteiraModal, {
+    log: log,
+    carteira: carteira,
+    saldo: saldo,
+    liberado: liberado,
+    agora: agora,
+    onComprar: min => comprarJogo(min, false),
+    onEmergencia: () => comprarJogo(0, true),
+    onPausar: pausar,
+    onEncerrarPausa: encerrarPausa,
+    onClose: () => setCarteiraAberta(false)
+  }), toast && /*#__PURE__*/React.createElement("div", {
+    key: toast.id,
+    className: "fade",
+    style: {
+      position: "fixed", left: "50%", bottom: 22, transform: "translateX(-50%)", zIndex: 60,
+      background: "var(--bg-elev2)", border: "1px solid var(--lime-dim)", color: "var(--lime)",
+      padding: "9px 16px", borderRadius: 20, fontSize: 13, fontWeight: 600,
+      maxWidth: "calc(100% - 32px)", textAlign: "center", boxShadow: "0 6px 20px #0008"
+    }
+  }, toast.txt), editing && /*#__PURE__*/React.createElement(EditorModal, {
     editing: editing,
     categorias: categoriasDisponiveis,
     onClose: () => setEditing(null),
@@ -1256,7 +1474,11 @@ function Header({
   hasApi,
   view,
   setView,
-  pullReminder
+  pullReminder,
+  saldo,
+  liberado,
+  agora,
+  onCarteira
 }) {
   // indicador discreto do auto-save
   const auto = {
@@ -1329,14 +1551,27 @@ function Header({
       fontSize: 11,
       color: "var(--text-3)"
     }
-  }, "onde você parou, e o próximo passo"))), hasApi && /*#__PURE__*/React.createElement("div", {
+  }, "onde você parou, e o próximo passo"))), /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
       gap: 8,
       alignItems: "center",
-      flex: "none"
+      flex: "none",
+      flexWrap: "wrap",
+      justifyContent: "flex-end"
     }
-  }, pullReminder && /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn btn-sm",
+    onClick: onCarteira,
+    title: "Carteira e loja de jogos",
+    style: {
+      fontWeight: 600,
+      borderColor: liberado ? "var(--lime)" : "var(--border-strong)",
+      color: saldo < 0 ? "var(--danger)" : "var(--text)"
+    }
+  }, "💎 " + saldo, liberado && /*#__PURE__*/React.createElement("span", {
+    style: { color: "var(--lime)", fontWeight: 500 }
+  }, "· 🎮 " + Math.max(1, Math.ceil((liberado - agora) / 60000)) + "m")), hasApi && pullReminder && /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 12,
       fontWeight: 600,
@@ -1348,7 +1583,7 @@ function Header({
       maxWidth: 150,
       textAlign: "right"
     }
-  }, "⚠️ Puxe antes de mexer"), /*#__PURE__*/React.createElement("button", {
+  }, "⚠️ Puxe antes de mexer"), hasApi && /*#__PURE__*/React.createElement("button", {
     className: "btn btn-sm",
     onClick: onPull,
     style: pullState === "ok" ? {
@@ -1536,6 +1771,7 @@ function CategoriaBloco({
   onRemove,
   onMover,
   onMoverCat,
+  onCotar,
   catFirst,
   catLast
 }) {
@@ -1628,6 +1864,7 @@ function CategoriaBloco({
     onEdit: onEdit,
     onRemove: onRemove,
     onMover: onMover,
+    onCotar: onCotar,
     isFirst: i === 0,
     isLast: i === projetos.length - 1
   })));
@@ -1642,11 +1879,16 @@ function ProjectCard({
   onRemove,
   onMover,
   isFirst,
-  isLast
+  isLast,
+  onCotar
 }) {
   const st = statusBadge(p);
   const rec = recorrenciaDe(p);
   const nextIdx = p.etapas.findIndex(e => !e.concluida);
+  // selo: quanto a próxima passada paga, em valor nominal
+  const cot = nextIdx !== -1 && onCotar ? onCotar(p) : null;
+  const seloTxt = [st && st.txt, cot && (cot.motivo ? "💎 " + cot.gemas + " · " + cot.motivo : "vale " + cot.gemas + " 💎")].filter(Boolean).join(" · ");
+  const seloQuente = cot && cot.mult > 1 && cot.gemas > 0;
   return /*#__PURE__*/React.createElement("div", {
     className: "fade",
     style: {
@@ -1660,12 +1902,15 @@ function ProjectCard({
     className: "row",
     style: {
       justifyContent: "space-between",
+      flexWrap: "wrap",
+      rowGap: 8,
       marginBottom: 12
     }
   }, /*#__PURE__*/React.createElement("div", {
     className: "row",
     style: {
       gap: 8,
+      flexWrap: "wrap",
       minWidth: 0
     }
   }, /*#__PURE__*/React.createElement("span", {
@@ -1697,13 +1942,14 @@ function ProjectCard({
       flex: "none",
       alignItems: "center"
     }
-  }, st && /*#__PURE__*/React.createElement("span", {
+  }, seloTxt && /*#__PURE__*/React.createElement("span", {
     className: "chip",
+    title: seloQuente ? "projeto em falta: vale mais que o normal (" + (cot.base) + " 💎)" : "",
     style: {
-      background: st.bg,
-      color: st.c
+      background: seloQuente ? "var(--warn-soft)" : st ? st.bg : "transparent",
+      color: seloQuente ? "var(--warn)" : st ? st.c : "var(--text-2)"
     }
-  }, st.txt), onMover && /*#__PURE__*/React.createElement("span", {
+  }, seloTxt), onMover &&/*#__PURE__*/React.createElement("span", {
     className: "row",
     style: {
       gap: 6
@@ -2024,8 +2270,19 @@ function LineChart({
    Lê o Log (que é a mesma fonte que o jogo usa para dar XP).
    ========================================================== */
 /* ============ ABA CHECK-INS (por PROJETO) ============ */
-function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckinRotina, onEdit }) {
+function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckinRotina, onEdit, onCotar }) {
   const hoje = todayISO();
+  // 💎 do cartão: o que já rendeu (feito) ou o que vai render (pendente)
+  const valorCartao = (p, feita) => {
+    if (diaSel > hoje) return null;
+    if (feita) {
+      const g = (log || []).filter(ev => ev.projeto === p.projeto && ev.data === diaSel)
+        .reduce((s, ev) => s + (ev.gemas || 0) + (ev.bonus || 0), 0);
+      return { txt: "+" + g + " 💎", dim: true };
+    }
+    const cot = onCotar(p, diaSel);
+    return { txt: "+" + cot.gemas + " 💎", hot: cot.mult > 1 && cot.gemas > 0, title: cot.motivo };
+  };
   const [diaSel, setDiaSel] = useState(hoje);
   const [adiado, setAdiado] = useState(() => {
     try { return localStorage.getItem(LS_ADIADO) === hoje; } catch (e) { return false; }
@@ -2061,7 +2318,7 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
     return diaSel === hoje ? t + " \u00B7 hoje" : t;
   })();
 
-  const cartao = (key, emoji, titulo, sub, feita, bloqueada, dots, extra, acao) =>
+  const cartao = (key, emoji, titulo, sub, feita, bloqueada, dots, extra, acao, valor) =>
     /*#__PURE__*/React.createElement("div", {
       key: key,
       className: "row",
@@ -2100,7 +2357,14 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
         }, sub)),
       dots && /*#__PURE__*/React.createElement("span", {
         style: { fontSize: 11, color: "var(--text-3)", letterSpacing: 1.5, flex: "none" }
-      }, dots));
+      }, dots),
+      valor && /*#__PURE__*/React.createElement("span", {
+        title: valor.title || "",
+        style: {
+          fontSize: 12, fontWeight: 700, flex: "none",
+          color: valor.dim ? "var(--done-text)" : valor.hot ? "var(--warn)" : "var(--lime)"
+        }
+      }, valor.txt));
 
   return /*#__PURE__*/React.createElement("div", { className: "fade" },
 
@@ -2226,7 +2490,7 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
               className: "btn btn-sm",
               style: { flex: "none", borderColor: "var(--lime-dim)", color: "var(--lime)" },
               onClick: () => et ? onCheckin(p, hoje) : onEdit(p)
-            }, et ? "passar pra hoje" : "definir"));
+            }, et ? "passar pra hoje · +" + onCotar(p, hoje).gemas + " 💎" : "definir"));
         }),
 
         /*#__PURE__*/React.createElement("div", {
@@ -2256,7 +2520,8 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
         const dots = meta > 1 ? "\u25CF".repeat(Math.min(pas, meta)) + "\u25CB".repeat(Math.max(0, meta - pas)) : null;
         return cartao(p.projId, p.emoji || "\uD83D\uDCCC", p.projeto, et.texto,
           feita, diaSel > hoje, dots, false,
-          () => feita ? onDesfazer(p, diaSel) : onCheckin(p, diaSel));
+          () => feita ? onDesfazer(p, diaSel) : onCheckin(p, diaSel),
+          valorCartao(p, feita));
       })),
 
     rots.length > 0 && /*#__PURE__*/React.createElement("div", { style: { marginBottom: 16 } },
@@ -2266,7 +2531,8 @@ function CheckinsView({ projetos, rotinas, log, onCheckin, onDesfazer, onCheckin
       rots.map(r => cartao("rot-" + (r.projId || r.projeto), r.emoji || "\uD83C\uDF31",
         (r.rotinaFreq === "Semanal" ? "semanal" : "di\u00E1ria") + " \u00B7 " + r.categoria,
         r.projeto, feitoNoDia(log, r.projeto, diaSel) > 0, diaSel > hoje, null, false,
-        () => onCheckinRotina(r, diaSel)))),
+        () => onCheckinRotina(r, diaSel),
+        valorCartao(r, feitoNoDia(log, r.projeto, diaSel) > 0)))),
 
     total === 0 && /*#__PURE__*/React.createElement("div", {
       style: {
@@ -2309,7 +2575,10 @@ function AvisoEtapaConcluida({ aviso, onRecriar, onNova, onFechar }) {
         }, (aviso.emoji || "") + " " + aviso.projeto
           + (aviso.restantes > 0
               ? " \u00B7 " + aviso.restantes + " etapa(s) na fila"
-              : " \u00B7 trilha completa"))),
+              : " \u00B7 trilha completa")),
+        aviso.bonus > 0 && /*#__PURE__*/React.createElement("div", {
+          style: { fontSize: 13, fontWeight: 700, color: "var(--lime)", marginTop: 10 }
+        }, "+" + aviso.bonus + " \uD83D\uDC8E b\u00F4nus de etapa")),
 
       modo === "aviso"
         ? /*#__PURE__*/React.createElement("div", null,
@@ -2421,6 +2690,126 @@ function RecorrenciaProjeto({ rec, dias, diaMes, onChange }) {
       }),
       /*#__PURE__*/React.createElement("span", { style: { fontSize: 10.5, color: "var(--text-3)" } },
         "em branco = qualquer dia")));
+}
+
+/* ============ CARTEIRA + LOJA DE JOGOS ============ */
+function CarteiraModal({ log, carteira, saldo, liberado, agora, onComprar, onEmergencia, onPausar, onEncerrarPausa, onClose }) {
+  const hoje = todayISO();
+  const [diasPausa, setDiasPausa] = useState(3);
+  const ganhoHoje = ganhoNoDia(log, hoje);
+  const emergUsada = emergenciaNaSemana(carteira, hoje);
+  const pausaAtiva = pausasDe(carteira).find(pa => hoje >= pa.inicio && hoje <= pa.fim);
+  const hora = ms => new Date(ms).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  const dataBR = iso => iso.slice(8, 10) + "/" + iso.slice(5, 7);
+
+  const movimentos = [
+    ...(log || []).slice().reverse().filter(ev => (ev.gemas || 0) + (ev.bonus || 0) > 0).map(ev => ({
+      data: ev.data,
+      txt: ev.projeto + (ev.bonus ? " · etapa concluída" : ""),
+      val: (ev.gemas || 0) + (ev.bonus || 0)
+    })),
+    ...(carteira || []).slice().reverse().filter(ehDesbloqueio).map(c => ({
+      data: dataLocalDe(c.criadoEm),
+      txt: (c.tipo === "emergencia" ? "🆘 emergência · " : "🎮 jogos · ") + c.minutos + " min",
+      val: -(c.gemas || 0)
+    }))
+  ].sort((a, b) => a.data < b.data ? 1 : a.data > b.data ? -1 : 0).slice(0, 12);
+
+  const secao = txt => /*#__PURE__*/React.createElement("div", {
+    style: { fontSize: 11, fontWeight: 600, color: "var(--text-2)", margin: "18px 0 8px" }
+  }, txt);
+
+  return /*#__PURE__*/React.createElement("div", { className: "modal-bg", onClick: onClose },
+    /*#__PURE__*/React.createElement("div", { className: "modal", onClick: e => e.stopPropagation() },
+      /*#__PURE__*/React.createElement("div", { className: "row", style: { justifyContent: "space-between", marginBottom: 14 } },
+        /*#__PURE__*/React.createElement("span", { style: { fontSize: 16, fontWeight: 600 } }, "💎 Carteira"),
+        /*#__PURE__*/React.createElement("span", { onClick: onClose, style: { cursor: "pointer", color: "var(--text-3)", fontSize: 18 } }, "✕")),
+
+      // saldo
+      /*#__PURE__*/React.createElement("div", { style: { textAlign: "center" } },
+        /*#__PURE__*/React.createElement("div", {
+          style: { fontSize: 38, fontWeight: 700, color: saldo < 0 ? "var(--danger)" : "var(--text)", letterSpacing: "-.02em" }
+        }, saldo + " 💎"),
+        /*#__PURE__*/React.createElement("div", { style: { fontSize: 11.5, color: "var(--text-3)", marginTop: 2 } },
+          saldo < 0 ? "dívida de emergência — os próximos ganhos pagam primeiro" : "carteira máx. " + ECON.carteiraMax + " 💎")),
+      /*#__PURE__*/React.createElement("div", { style: { marginTop: 14 } },
+        /*#__PURE__*/React.createElement("div", {
+          className: "row", style: { justifyContent: "space-between", fontSize: 11, color: "var(--text-3)", marginBottom: 5 }
+        }, /*#__PURE__*/React.createElement("span", null, "ganho hoje"),
+          /*#__PURE__*/React.createElement("span", null, ganhoHoje + " / " + ECON.tetoDia + " 💎")),
+        /*#__PURE__*/React.createElement("div", { style: { height: 5, background: "var(--bg-elev2)", borderRadius: 4, overflow: "hidden" } },
+          /*#__PURE__*/React.createElement("div", {
+            style: { width: Math.min(100, ganhoHoje / ECON.tetoDia * 100) + "%", height: "100%", background: "var(--lime)" }
+          }))),
+
+      // estado dos jogos
+      /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: 16, padding: "11px 13px", borderRadius: 11, fontSize: 13, fontWeight: 600,
+          background: liberado ? "var(--lime-soft)" : "var(--bg-elev2)",
+          border: "1px solid " + (liberado ? "var(--lime-dim)" : "var(--border-strong)"),
+          color: liberado ? "var(--lime)" : "var(--text-2)"
+        }
+      }, liberado
+        ? "🎮 Jogos liberados até " + hora(liberado) + " · restam " + Math.max(1, Math.ceil((liberado - agora) / 60000)) + " min"
+        : "🔒 Jogos travados",
+        /*#__PURE__*/React.createElement("div", { style: { fontSize: 10.5, fontWeight: 400, color: "var(--text-3)", marginTop: 4 } },
+          "a trava automática no PC chega na fase 2 (Cold Turkey) — por enquanto é no esquema de honra")),
+
+      secao(liberado ? "Emendar mais tempo de jogo" : "Comprar tempo de jogo"),
+      /*#__PURE__*/React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 } },
+        ECON.pacotes.map(min => {
+          const custo = min * ECON.precoMin, pode = saldo >= custo;
+          return /*#__PURE__*/React.createElement("button", {
+            key: min,
+            className: "btn" + (pode ? " btn-primary" : ""),
+            disabled: !pode,
+            onClick: () => pode && onComprar(min),
+            style: { flexDirection: "column", gap: 2, justifyContent: "center", padding: "10px 4px", opacity: pode ? 1 : .4, cursor: pode ? "pointer" : "default" }
+          }, /*#__PURE__*/React.createElement("span", { style: { fontSize: 14, fontWeight: 700 } }, (liberado ? "+" : "") + min + " min"),
+            /*#__PURE__*/React.createElement("span", { style: { fontSize: 11 } }, custo + " 💎"));
+        })),
+      /*#__PURE__*/React.createElement("button", {
+        className: "btn",
+        disabled: emergUsada,
+        onClick: () => { if (!emergUsada && confirm("Usar a emergência da semana? São " + ECON.emergenciaMin + " min que viram dívida de " + ECON.emergenciaMin * ECON.precoMin + " 💎.")) onEmergencia(); },
+        style: { width: "100%", justifyContent: "center", marginTop: 8, opacity: emergUsada ? .45 : 1, cursor: emergUsada ? "default" : "pointer" }
+      }, emergUsada ? "🆘 emergência já usada nesta semana" : "🆘 Emergência · " + ECON.emergenciaMin + " min (vira dívida)"),
+
+      secao("Pausa (doença, viagem)"),
+      pausaAtiva
+        ? /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 10, justifyContent: "space-between" } },
+            /*#__PURE__*/React.createElement("span", { style: { fontSize: 12.5, color: "var(--warn)" } },
+              "⏸ em pausa até " + dataBR(pausaAtiva.fim) + " — faltas não contam"),
+            /*#__PURE__*/React.createElement("button", { className: "btn btn-sm", onClick: onEncerrarPausa }, "encerrar"))
+        : /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 8 } },
+            /*#__PURE__*/React.createElement("span", { style: { fontSize: 12, color: "var(--text-3)", flex: "none" } }, "pausar faltas por"),
+            /*#__PURE__*/React.createElement("input", {
+              type: "number", min: "1", max: String(ECON.pausaMaxDias), value: diasPausa,
+              onChange: e => setDiasPausa(e.target.value),
+              style: { width: 60, textAlign: "center", padding: "7px 4px" }
+            }),
+            /*#__PURE__*/React.createElement("span", { style: { fontSize: 12, color: "var(--text-3)", flex: 1 } }, "dia(s)"),
+            /*#__PURE__*/React.createElement("button", {
+              className: "btn btn-sm",
+              onClick: () => { if (confirm("Pausar por " + diasPausa + " dia(s)? Nesses dias nada fica em falta.")) onPausar(diasPausa); }
+            }, "pausar")),
+
+      secao("Movimentos"),
+      movimentos.length === 0
+        ? /*#__PURE__*/React.createElement("div", { style: { fontSize: 12, color: "var(--text-3)" } },
+            "Nenhum movimento ainda. Faça um check-in numa tarefa árdua para ganhar as primeiras 💎.")
+        : movimentos.map((m, i) => /*#__PURE__*/React.createElement("div", {
+            key: i, className: "row",
+            style: { gap: 10, padding: "6px 0", borderTop: i ? "1px solid var(--border)" : "none", fontSize: 12.5 }
+          },
+            /*#__PURE__*/React.createElement("span", { style: { color: "var(--text-3)", fontSize: 11, width: 38, flex: "none" } }, dataBR(m.data)),
+            /*#__PURE__*/React.createElement("span", {
+              style: { flex: 1, minWidth: 0, color: "var(--text-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+            }, m.txt),
+            /*#__PURE__*/React.createElement("span", {
+              style: { fontWeight: 700, flex: "none", color: m.val > 0 ? "var(--lime)" : "var(--warn)" }
+            }, (m.val > 0 ? "+" : "") + m.val)))));
 }
 
 function CalendarioView({ projetos, log }) {
@@ -2831,6 +3220,7 @@ function EditorModal({
   const [novoNome, setNovoNome] = useState("");
   const [novoEmoji, setNovoEmoji] = useState("📌");
   const [rotinaFreq, setRotinaFreq] = useState(editing.rotinaFreq || "Diaria");
+  const [esforco, setEsforco] = useState(isNew ? "media" : editing.esforco || "media");
   const [rec, setRec] = useState(isNew ? "" : recorrenciaDe(editing));
   const [dias, setDias] = useState(isNew ? [] : (editing.dias || []));
   const [diaMes, setDiaMes] = useState(isNew ? 0 : Number(editing.diaMes || 0));
@@ -2872,6 +3262,7 @@ function EditorModal({
       emoji,
       tipo: editing.tipo,
       rotinaFreq,
+      esforco: isRotina ? "leve" : esforco,
       recorrencia: isRotina ? "" : rec,
       dias: rec === "semanal" ? dias : [],
       diaMes: rec === "mensal" ? Math.max(0, Math.min(31, parseInt(diaMes) || 0)) : 0,
@@ -3023,7 +3414,23 @@ function EditorModal({
     value: "Diaria"
   }, "Diária (reseta todo dia)"), /*#__PURE__*/React.createElement("option", {
     value: "Semanal"
-  }, "Semanal (reseta domingo)"))), !isRotina && /*#__PURE__*/React.createElement(RecorrenciaProjeto, {
+  }, "Semanal (reseta domingo)"))), !isRotina && /*#__PURE__*/React.createElement("div", {
+    style: { marginBottom: 16 }
+  }, /*#__PURE__*/React.createElement("label", null, "Esforço — quanto cada passada rende"),
+  /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 6, flexWrap: "wrap" } },
+    ESFORCOS.map(e => /*#__PURE__*/React.createElement("span", {
+      key: e.id,
+      onClick: () => setEsforco(e.id),
+      style: {
+        cursor: "pointer", fontSize: 11.5, padding: "6px 11px", borderRadius: 8,
+        background: esforco === e.id ? "var(--lime-soft)" : "var(--bg-elev2)",
+        border: "1px solid " + (esforco === e.id ? "var(--lime)" : "var(--border-strong)"),
+        color: esforco === e.id ? "var(--lime)" : "var(--text-2)"
+      }
+    }, e.nome + " · " + e.gemas + " 💎"))),
+  /*#__PURE__*/React.createElement("div", { style: { fontSize: 10.5, color: "var(--text-3)", marginTop: 5 } },
+    (ESFORCOS.find(e => e.id === esforco) || ESFORCOS[1]).dica + " por passada · rende mais quando o projeto está em falta")),
+  !isRotina && /*#__PURE__*/React.createElement(RecorrenciaProjeto, {
     rec: rec,
     dias: dias,
     diaMes: diaMes,
