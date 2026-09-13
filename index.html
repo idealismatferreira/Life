@@ -792,6 +792,23 @@ function agendaDoDia(dia, projetos, rotinas, agenda, log) {
   return out.sort((a, b) => (a.hora ? 0 : 1) - (b.hora ? 0 : 1) || (a.hora < b.hora ? -1 : a.hora > b.hora ? 1 : 0));
 }
 
+/* Ordem manual da aba Check-ins (só daquele dia) aplicada sobre a ordem por horário.
+   Linhas que surgiram depois de reordenar entram antes da primeira linha de horário posterior. */
+function ordenarFila(base, ordem) {
+  if (!ordem || !ordem.length) return base;
+  const idxBase = {}, porKey = {};
+  base.forEach((e, i) => { idxBase[e.key] = i; porKey[e.key] = e; });
+  const out = ordem.filter(k => porKey[k]).map(k => porKey[k]);
+  const dentro = {};
+  out.forEach(e => { dentro[e.key] = true; });
+  base.forEach(e => {
+    if (dentro[e.key]) return;
+    const pos = out.findIndex(o => idxBase[o.key] > idxBase[e.key]);
+    if (pos === -1) out.push(e); else out.splice(pos, 0, e);
+  });
+  return out;
+}
+
 /* "violino amanhã 19h 30min" -> campos do compromisso.
    Entende: hoje, amanhã, depois de amanhã, seg…dom, 15/09, 19h, 19:30, 30min,
    toda seg e qua, todo dia, todo mês. Tudo continua ajustável nos chips. */
@@ -1045,6 +1062,7 @@ function App() {
   const [agenda, setAgenda] = useState([]); // compromissos com data/hora (avulsos ou ligados a projeto)
   const [agendando, setAgendando] = useState(null); // {data} = novo | {item, dia} = editar
   const [ordenacao, setOrdenacao] = useState("personalizada"); // "recompensa" | "personalizada"
+  const [ordemDia, setOrdemDia] = useState({}); // { "yyyy-mm-dd": [keys] } ordem arrastada na aba Check-ins
   const [carteiraAberta, setCarteiraAberta] = useState(false);
   const [toast, setToast] = useState(null); // {txt, id} -> "+20 💎"
   const [agora, setAgora] = useState(Date.now()); // relógio p/ contagem do desbloqueio
@@ -1075,6 +1093,7 @@ function App() {
         setCarteira(data.carteira || []);
         setAgenda(data.agenda || []);
         setOrdenacao(data.ordenacao || "personalizada");
+        setOrdemDia(data.ordemDia || {});
       } catch (e) {}
     }
     setLoaded(true);
@@ -1090,10 +1109,11 @@ function App() {
       carteira,
       agenda,
       ordenacao,
+      ordemDia,
       savedAt: Date.now()
     }));
     dirty.current = true;
-  }, [projects, log, ordemCat, carteira, agenda, ordenacao, loaded]);
+  }, [projects, log, ordemCat, carteira, agenda, ordenacao, ordemDia, loaded]);
 
   // Auto-push pro Sheets (debounce 2s após a última mudança)
   useEffect(() => {
@@ -1123,6 +1143,10 @@ function App() {
           action: "syncAgenda",
           agenda: agenda
         });
+        await apiCall({
+          action: "syncOrdem",
+          ordem: ordemDia
+        });
         dirty.current = false;
         setAutoState("ok");
         setTimeout(() => setAutoState("idle"), 1500);
@@ -1133,7 +1157,7 @@ function App() {
     return () => {
       if (pushTimer.current) clearTimeout(pushTimer.current);
     };
-  }, [projects, log, carteira, agenda, loaded]);
+  }, [projects, log, carteira, agenda, ordemDia, loaded]);
 
   /* Rotinas voltam ao zero quando vira o dia (ou a semana). */
 function resetRotinas(list) {
@@ -1524,6 +1548,17 @@ function resetRotinas(list) {
     if (e.item) setAgendando({ item: e.item, dia });
     else if (e.tipo === "projeto") setEditing({ ref: e.p, ...e.p });
   }
+  // ordem arrastada vale só para aquele dia; keys = null volta à ordem dos horários.
+  // Guarda só os últimos 30 dias para a planilha não crescer à toa.
+  function reordenarDia(dia, keys) {
+    const limite = somaDias(todayISO(), -30);
+    setOrdemDia(prev => {
+      const n = {};
+      Object.keys(prev).forEach(d => { if (d >= limite) n[d] = prev[d]; });
+      if (keys) n[dia] = keys; else delete n[dia];
+      return n;
+    });
+  }
   function saveEdited(proj, isNew) {
     if (isNew) setProjects(prev => [...prev, proj]);else setProjects(prev => prev.map(p => proj.projId && p.projId === proj.projId || p === editing.ref ? proj : p));
     setEditing(null);
@@ -1556,6 +1591,9 @@ function resetRotinas(list) {
       const ra = await apiCall({
         action: "getAgenda"
       });
+      const ro = await apiCall({
+        action: "getOrdem"
+      });
       if (r.ok) {
         const logNuvem = (rl.ok && rl.log) ? normalizarLog(rl.log) : [];
         const migrados2 = migrarProjetos(rowsToProjects(r.rows), logNuvem);
@@ -1563,6 +1601,7 @@ function resetRotinas(list) {
         if (rl.ok) setLog(logNuvem);
         if (rc.ok) setCarteira(rc.carteira || []);
         if (ra.ok) setAgenda(ra.agenda || []);
+        if (ro.ok) setOrdemDia(ro.ordem || {});
         firstSave.current = true; // não re-empurra logo após puxar
         setPullReminder(false); // já puxou, pode mexer
         setSyncState("ok");
@@ -1600,7 +1639,10 @@ function resetRotinas(list) {
     onCotarAvulsa: cotarAv,
     onTick: tickEntrada,
     onAbrir: abrirEntrada,
-    onNovo: dia => setAgendando({ data: dia })
+    onNovo: dia => setAgendando({ data: dia }),
+    ordemDia: ordemDia,
+    onReordenar: reordenarDia,
+    onResetOrdem: dia => reordenarDia(dia, null)
   }) : view === "calendario" ? /*#__PURE__*/React.createElement(CalendarioView, {
     projetos: projetos,
     rotinas: rotinas,
@@ -2570,47 +2612,52 @@ function LineChart({
    Lê o Log (que é a mesma fonte que o jogo usa para dar XP).
    ========================================================== */
 /* ============ LINHA DO TEMPO DE UM DIA (Check-ins e Calendário) ============ */
+// texto, 💎 e estado de uma linha da agenda — compartilhado pela linha do tempo e pela fila
+function infoLinha(e, dia, log, onCotar, onCotarAvulsa) {
+  const hoje = todayISO(), futuro = dia > hoje;
+  const p = e.p, it = e.item;
+  const et = e.tipo === "projeto" ? etapaVigente(p) : null;
+  const emoji = e.tipo === "avulso" ? "📅" : (p.emoji || (e.tipo === "rotina" ? "🌱" : "📌"));
+  const titulo = (it && it.titulo) || (p ? p.projeto : "");
+  const partes = [];
+  if (e.tipo === "projeto") {
+    if (it && it.titulo && it.titulo !== p.projeto) partes.push(p.projeto);
+    partes.push(et ? et.texto : "⚠️ sem próxima etapa — toque para definir");
+  }
+  if (e.tipo === "rotina") partes.push("rotina");
+  const rep = it ? resumoRepetir(it) : e.tipo === "projeto" ? resumoRec(p) : "";
+  if (rep) partes.push("🔁 " + rep);
+
+  let valor = null;
+  if (e.feita) {
+    // 💎 que a linha já rendeu neste dia
+    let g = 0;
+    if (e.tipo === "avulso") {
+      const k = eventoAvulso(log, it, dia);
+      g = k === -1 ? 0 : (log[k].gemas || 0);
+    } else {
+      g = (log || []).filter(ev => ev.projeto === p.projeto && ev.data === dia && !ev.agendaId)
+        .reduce((s, ev) => s + (ev.gemas || 0) + (ev.bonus || 0), 0);
+    }
+    if (g > 0) valor = { txt: "+" + g + " 💎", cor: "var(--done-text)" };
+  } else if (!futuro) {
+    const cot = e.tipo === "avulso" ? (it.esforco ? onCotarAvulsa(it, dia) : null)
+      : (e.tipo === "rotina" || et) ? onCotar(p, dia) : null;
+    if (cot) valor = {
+      txt: "+" + cot.gemas + " 💎", title: cot.motivo,
+      cor: cot.gemas === 0 ? "var(--text-3)" : cot.mult > 1 ? "var(--warn)" : "var(--lime)"
+    };
+  }
+  const atrasada = !e.feita && (dia < hoje || (dia === hoje && e.hora && e.hora < horaAgora()));
+  return { et, emoji, titulo, partes, valor, atrasada, futuro };
+}
+
 function DiaAgenda({ dia, entradas, log, onTick, onAbrir, onCotar, onCotarAvulsa }) {
   const hoje = todayISO(), agora = horaAgora();
   const futuro = dia > hoje;
 
-  // 💎 que a linha já rendeu neste dia
-  const ganhoDe = e => {
-    if (e.tipo === "avulso") {
-      const k = eventoAvulso(log, e.item, dia);
-      return k === -1 ? 0 : (log[k].gemas || 0);
-    }
-    return (log || []).filter(ev => ev.projeto === e.p.projeto && ev.data === dia && !ev.agendaId)
-      .reduce((s, ev) => s + (ev.gemas || 0) + (ev.bonus || 0), 0);
-  };
-
   const linha = e => {
-    const p = e.p, it = e.item;
-    const et = e.tipo === "projeto" ? etapaVigente(p) : null;
-    const emoji = e.tipo === "avulso" ? "📅" : (p.emoji || (e.tipo === "rotina" ? "🌱" : "📌"));
-    const titulo = (it && it.titulo) || (p ? p.projeto : "");
-    const partes = [];
-    if (e.tipo === "projeto") {
-      if (it && it.titulo && it.titulo !== p.projeto) partes.push(p.projeto);
-      partes.push(et ? et.texto : "⚠️ sem próxima etapa — toque para definir");
-    }
-    if (e.tipo === "rotina") partes.push("rotina");
-    const rep = it ? resumoRepetir(it) : e.tipo === "projeto" ? resumoRec(p) : "";
-    if (rep) partes.push("🔁 " + rep);
-
-    let valor = null;
-    if (e.feita) {
-      const g = ganhoDe(e);
-      if (g > 0) valor = { txt: "+" + g + " 💎", cor: "var(--done-text)" };
-    } else if (!futuro) {
-      const cot = e.tipo === "avulso" ? (it.esforco ? onCotarAvulsa(it, dia) : null)
-        : (e.tipo === "rotina" || et) ? onCotar(p, dia) : null;
-      if (cot) valor = {
-        txt: "+" + cot.gemas + " 💎", title: cot.motivo,
-        cor: cot.gemas === 0 ? "var(--text-3)" : cot.mult > 1 ? "var(--warn)" : "var(--lime)"
-      };
-    }
-    const atrasada = !e.feita && (dia < hoje || (dia === hoje && e.hora && e.hora < agora));
+    const { et, emoji, titulo, partes, valor, atrasada } = infoLinha(e, dia, log, onCotar, onCotarAvulsa);
 
     return /*#__PURE__*/React.createElement("div", {
       key: e.key, className: "row", style: { gap: 10, alignItems: "stretch", marginBottom: 6 }
@@ -2691,8 +2738,145 @@ function DiaAgenda({ dia, entradas, log, onTick, onAbrir, onCotar, onCotarAvulsa
   return /*#__PURE__*/React.createElement("div", null, nodes);
 }
 
-/* ============ ABA CHECK-INS: A AGENDA DO DIA ============ */
-function CheckinsView({ projetos, rotinas, agenda, log, onCheckin, onEdit, onCotar, onCotarAvulsa, onTick, onAbrir, onNovo }) {
+/* ============ FILA DO DIA: LISTA REORDENÁVEL (arrastar e soltar) ============
+   Arrasta pela alça ⠿ com pointer events (toque e mouse). A alça tem touch-action:none,
+   então só ela bloqueia a rolagem; o resto do cartão rola a página normalmente. */
+const FILA_GAP = 6;
+function FilaDoDia({ dia, entradas, log, onTick, onAbrir, onCotar, onCotarAvulsa, onReordenar }) {
+  const refs = useRef({});
+  const dragRef = useRef(null); // estado vivo do arraste (os eventos leem daqui)
+  const [drag, setDrag] = useState(null); // cópia para renderizar
+
+  const atualizar = d => { dragRef.current = d; setDrag(d); };
+  const recalcular = clientY => {
+    const d = dragRef.current;
+    if (!d) return;
+    const dy = clientY + window.scrollY - d.startY;
+    const centro = d.itens[d.from].meio + dy;
+    let over = d.from;
+    for (let k = 0; k < d.from; k++) if (centro < d.itens[k].meio) { over = k; break; }
+    if (over === d.from) for (let k = d.itens.length - 1; k > d.from; k--) if (centro > d.itens[k].meio) { over = k; break; }
+    atualizar({ ...d, dy, over, clientY });
+  };
+  const iniciar = (ev, i) => {
+    ev.preventDefault();
+    if (ev.currentTarget.setPointerCapture) ev.currentTarget.setPointerCapture(ev.pointerId);
+    const itens = entradas.map(x => {
+      const r = refs.current[x.key].getBoundingClientRect();
+      return { meio: r.top + window.scrollY + r.height / 2, h: r.height };
+    });
+    atualizar({ key: entradas[i].key, from: i, over: i, dy: 0, startY: ev.clientY + window.scrollY, clientY: ev.clientY, itens });
+  };
+  const mover = ev => { if (dragRef.current) recalcular(ev.clientY); };
+  const soltar = () => {
+    const d = dragRef.current;
+    if (!d) return;
+    atualizar(null);
+    if (d.over !== d.from) {
+      const keys = entradas.map(x => x.key);
+      const [k] = keys.splice(d.from, 1);
+      keys.splice(d.over, 0, k);
+      onReordenar(keys);
+    }
+  };
+  // rola a página sozinha quando o dedo chega perto da borda da tela
+  const arrastando = !!drag;
+  useEffect(() => {
+    if (!arrastando) return;
+    const t = setInterval(() => {
+      const d = dragRef.current;
+      if (!d) return;
+      const borda = 70, v = d.clientY < borda ? -10 : d.clientY > window.innerHeight - borda ? 10 : 0;
+      if (v) { window.scrollBy(0, v); recalcular(d.clientY); }
+    }, 16);
+    return () => clearInterval(t);
+  }, [arrastando]);
+
+  return /*#__PURE__*/React.createElement("div", null, entradas.map((e, i) => {
+    const { et, emoji, titulo, partes, valor, atrasada, futuro } = infoLinha(e, dia, log, onCotar, onCotarAvulsa);
+    const esta = drag && drag.key === e.key;
+    let transform = "none";
+    if (esta) transform = "translateY(" + drag.dy + "px) scale(1.02)";
+    else if (drag) {
+      const passo = drag.itens[drag.from].h + FILA_GAP;
+      if (drag.from < drag.over && i > drag.from && i <= drag.over) transform = "translateY(" + -passo + "px)";
+      if (drag.over < drag.from && i >= drag.over && i < drag.from) transform = "translateY(" + passo + "px)";
+    }
+    const etiqueta = [e.hora, e.duracao > 0 ? fmtDur(e.duracao) : ""].filter(Boolean).join(" · ");
+
+    return /*#__PURE__*/React.createElement("div", {
+      key: e.key,
+      ref: el => { refs.current[e.key] = el; },
+      className: "row",
+      style: {
+        gap: 9, marginBottom: FILA_GAP, borderRadius: 11, padding: "9px 12px 9px 2px", position: "relative",
+        background: e.feita && !esta ? "transparent" : "var(--card)",
+        border: "1px solid " + (esta ? "var(--lime-dim)" : atrasada ? "#e0b75555" : "var(--border)"),
+        opacity: e.feita && !esta ? .68 : 1,
+        transform: transform,
+        transition: esta ? "none" : "transform .16s ease",
+        zIndex: esta ? 5 : 1,
+        boxShadow: esta ? "0 12px 30px #000b" : "none"
+      }
+    },
+      /*#__PURE__*/React.createElement("span", {
+        title: "segure e arraste",
+        onPointerDown: ev => iniciar(ev, i),
+        onPointerMove: mover,
+        onPointerUp: soltar,
+        onPointerCancel: soltar,
+        style: {
+          cursor: esta ? "grabbing" : "grab", touchAction: "none", userSelect: "none", WebkitUserSelect: "none",
+          color: esta ? "var(--lime)" : "var(--text-3)", fontSize: 18, lineHeight: 1,
+          padding: "10px 6px 10px 10px", flex: "none", alignSelf: "stretch", display: "flex", alignItems: "center"
+        }
+      }, "⠿"),
+      /*#__PURE__*/React.createElement("span", {
+        onClick: () => { if (!futuro) onTick(e, dia); },
+        title: futuro ? "dia futuro" : e.feita ? "desfazer" : "marcar como feito",
+        style: {
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          width: 24, height: 24, borderRadius: 7, flex: "none",
+          cursor: futuro ? "default" : "pointer",
+          background: e.feita ? "var(--lime)" : "transparent",
+          border: e.feita ? "1px solid var(--lime)" : "1.5px solid " + (futuro ? "var(--border-strong)" : "var(--text-3)"),
+          color: "#0b0f0c", fontSize: 13, fontWeight: 700
+        }
+      }, e.feita ? "✓" : ""),
+      /*#__PURE__*/React.createElement("div", {
+        onClick: () => onAbrir(e, dia),
+        style: { flex: 1, minWidth: 0, cursor: e.tipo === "rotina" ? "default" : "pointer" }
+      },
+        /*#__PURE__*/React.createElement("div", {
+          className: "row", style: { gap: 7, minWidth: 0 }
+        },
+          etiqueta && /*#__PURE__*/React.createElement("span", {
+            style: {
+              flex: "none", fontSize: 10.5, fontWeight: 700, padding: "1px 6px", borderRadius: 5,
+              background: atrasada ? "var(--warn-soft)" : "var(--bg-elev2)",
+              color: atrasada ? "var(--warn)" : "var(--text-2)"
+            }
+          }, etiqueta),
+          /*#__PURE__*/React.createElement("span", {
+            style: {
+              fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+              color: e.feita ? "var(--done-text)" : "var(--text)", textDecoration: e.feita ? "line-through" : "none"
+            }
+          }, emoji + " " + titulo)),
+        partes.length > 0 && /*#__PURE__*/React.createElement("div", {
+          style: {
+            fontSize: 11, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+            color: e.tipo === "projeto" && !et ? "var(--warn)" : "var(--text-3)"
+          }
+        }, partes.join(" · "))),
+      valor && /*#__PURE__*/React.createElement("span", {
+        title: valor.title || "", style: { fontSize: 12, fontWeight: 700, flex: "none", color: valor.cor }
+      }, valor.txt));
+  }));
+}
+
+/* ============ ABA CHECK-INS: A FILA DO DIA ============ */
+function CheckinsView({ projetos, rotinas, agenda, log, onCheckin, onEdit, onCotar, onCotarAvulsa, onTick, onAbrir, onNovo, ordemDia, onReordenar, onResetOrdem }) {
   const hoje = todayISO();
   const [diaSel, setDiaSel] = useState(hoje);
   const [adiado, setAdiado] = useState(() => {
@@ -2710,6 +2894,10 @@ function CheckinsView({ projetos, rotinas, agenda, log, onCheckin, onEdit, onCot
   const entradas = useMemo(
     () => agendaDoDia(diaSel, projetos, rotinas, agenda, log),
     [diaSel, projetos, rotinas, agenda, log]);
+  // começa pelos horários; se você arrastou algo neste dia, vale a sua ordem
+  const ordem = (ordemDia || {})[diaSel];
+  const fila = useMemo(() => ordenarFila(entradas, ordem), [entradas, ordem]);
+  const temOrdem = !!(ordem && ordem.length);
   const total = entradas.length, ok = entradas.filter(e => e.feita).length;
   const pct = total ? Math.round(ok / total * 100) : 0;
   const totalDia = iso => (log || []).filter(ev => String(ev.data).slice(0, 10) === iso).length;
@@ -2846,9 +3034,20 @@ function CheckinsView({ projetos, rotinas, agenda, log, onCheckin, onEdit, onCot
           style: { fontSize: 10, color: "var(--text-3)", marginTop: 9, lineHeight: 1.5 }
         }, "registra o check-in com a data de hoje · a lista zera toda segunda"))),
 
-    total > 0 && /*#__PURE__*/React.createElement(DiaAgenda, {
-      dia: diaSel, entradas: entradas, log: log,
-      onTick: onTick, onAbrir: onAbrir, onCotar: onCotar, onCotarAvulsa: onCotarAvulsa
+    total > 1 && /*#__PURE__*/React.createElement("div", {
+      className: "row",
+      style: { justifyContent: "space-between", gap: 8, fontSize: 11, color: "var(--text-3)", margin: "0 0 8px" }
+    },
+      /*#__PURE__*/React.createElement("span", null, "⠿ segure e arraste para reordenar este dia"),
+      temOrdem && /*#__PURE__*/React.createElement("span", {
+        onClick: () => onResetOrdem(diaSel),
+        style: { cursor: "pointer", color: "var(--lime)", flex: "none" }
+      }, "↺ ordem dos horários")),
+
+    total > 0 && /*#__PURE__*/React.createElement(FilaDoDia, {
+      dia: diaSel, entradas: fila, log: log,
+      onTick: onTick, onAbrir: onAbrir, onCotar: onCotar, onCotarAvulsa: onCotarAvulsa,
+      onReordenar: keys => onReordenar(diaSel, keys)
     }),
 
     total === 0 && /*#__PURE__*/React.createElement("div", {
