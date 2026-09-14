@@ -1033,16 +1033,36 @@ function projectsToRows(projects) {
   });
   return rows;
 }
+/* O Apps Script às vezes demora dezenas de segundos ou devolve 404 intermitente.
+   Cada chamada tem limite de tempo e até 3 tentativas. Uma resposta JSON do servidor
+   (mesmo ok:false) não é repetida — só falhas de rede, HTTP ou tempo esgotado. */
+const API_TIMEOUT_MS = 25000;
+const API_TENTATIVAS = 3;
 async function apiCall(payload) {
   if (!API_URL) throw new Error("no-api");
-  const res = await fetch(API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/plain;charset=utf-8"
-    },
-    body: JSON.stringify(payload)
-  });
-  return res.json();
+  let ultimoErro;
+  for (let t = 0; t < API_TENTATIVAS; t++) {
+    if (t) await new Promise(r => setTimeout(r, 1000 * t));
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), API_TIMEOUT_MS) : null;
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify(payload),
+        signal: ctrl ? ctrl.signal : undefined
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return await res.json();
+    } catch (e) {
+      ultimoErro = e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  throw ultimoErro;
 }
 
 /* ============ APP ============ */
@@ -1055,6 +1075,7 @@ function App() {
   const [autoState, setAutoState] = useState("idle"); // status do auto-push: idle|saving|ok|err
   const [pullReminder, setPullReminder] = useState(true); // overlay "puxar" ao abrir; some depois de puxar
   const [falhouPull, setFalhouPull] = useState(false); // habilita "continuar offline" no overlay
+  const [pullErro, setPullErro] = useState(""); // mensagem do último erro ao puxar
   const [editing, setEditing] = useState(null); // projeto em edição ou "new"
   const [view, setView] = useState("home"); // home | checkins | progresso | calendario
   const [aviso, setAviso] = useState(null); // {projId, projeto, etapa} -> modal "etapa concluida"
@@ -1115,7 +1136,61 @@ function App() {
     dirty.current = true;
   }, [projects, log, ordemCat, carteira, agenda, ordenacao, ordemDia, loaded]);
 
-  // Auto-push pro Sheets (debounce 2s após a última mudança)
+  /* Auto-push pro Sheets: uma chamada só (syncTudo), nunca duas ao mesmo tempo.
+     - estadoRef: a gravação sempre manda o estado MAIS RECENTE, não o de quando foi agendada
+     - se algo muda durante uma gravação, marca pendente e grava de novo ao terminar
+     - revRef: versão da nuvem que este aparelho conhece; se outro aparelho gravou depois,
+       o servidor recusa (conflito) e o app pede para puxar, em vez de sobrescrever */
+  const estadoRef = useRef(null);
+  estadoRef.current = { projects, log, carteira, agenda, ordemDia };
+  const revRef = useRef(null);
+  const gravando = useRef(false);
+  const gravarDeNovo = useRef(false);
+
+  async function empurrar() {
+    if (gravando.current) {
+      gravarDeNovo.current = true;
+      return;
+    }
+    gravando.current = true;
+    setAutoState("saving");
+    try {
+      do {
+        gravarDeNovo.current = false;
+        const s = estadoRef.current;
+        const r = await apiCall({
+          action: "syncTudo",
+          baseRev: revRef.current,
+          syncId: uid() + Date.now().toString(36),
+          rows: projectsToRows(s.projects),
+          log: s.log,
+          carteira: s.carteira,
+          agenda: s.agenda,
+          ordem: s.ordemDia
+        });
+        if (!r.ok) {
+          if (r.conflito) {
+            setAutoState("conflito");
+            setPullReminder(true); // outro aparelho salvou depois: puxar antes de continuar
+            return;
+          }
+          throw new Error(r.error || "erro ao salvar");
+        }
+        revRef.current = r.rev;
+      } while (gravarDeNovo.current);
+      dirty.current = false;
+      setAutoState("ok");
+      setTimeout(() => setAutoState(a => a === "ok" ? "idle" : a), 1500);
+    } catch (e) {
+      setAutoState("err");
+      // tenta de novo sozinho em 20s se ainda houver mudança não salva
+      setTimeout(() => { if (dirty.current && !gravando.current) empurrar(); }, 20000);
+    } finally {
+      gravando.current = false;
+    }
+  }
+
+  // debounce 2s após a última mudança
   useEffect(() => {
     if (!loaded || !API_URL) return;
     // não dispara no primeiro load (que é quando o estado é populado)
@@ -1123,37 +1198,10 @@ function App() {
       firstSave.current = false;
       return;
     }
+    if (pullReminder) return; // enquanto não puxou, não grava por cima da nuvem
     if (pushTimer.current) clearTimeout(pushTimer.current);
     setAutoState("saving");
-    pushTimer.current = setTimeout(async () => {
-      try {
-        await apiCall({
-          action: "sync",
-          rows: projectsToRows(projects)
-        });
-        await apiCall({
-          action: "syncLog",
-          log: log
-        });
-        await apiCall({
-          action: "syncCarteira",
-          carteira: carteira
-        });
-        await apiCall({
-          action: "syncAgenda",
-          agenda: agenda
-        });
-        await apiCall({
-          action: "syncOrdem",
-          ordem: ordemDia
-        });
-        dirty.current = false;
-        setAutoState("ok");
-        setTimeout(() => setAutoState("idle"), 1500);
-      } catch (e) {
-        setAutoState("err"); // fica em erro até a próxima tentativa dar certo
-      }
-    }, 2000);
+    pushTimer.current = setTimeout(empurrar, 2000);
     return () => {
       if (pushTimer.current) clearTimeout(pushTimer.current);
     };
@@ -1578,39 +1626,30 @@ function resetRotinas(list) {
     const temLocal = projects.length > 0;
     if (!semConfirmar && temLocal && !confirm("Puxar do Sheets vai substituir os projetos deste dispositivo pela versão da nuvem. As mudanças recentes deste aparelho já sincronizaram? Continuar?")) return;
     setSyncState("saving");
+    setPullErro("");
     try {
+      // uma chamada só: menos chances de cair num 404 do Apps Script
       const r = await apiCall({
-        action: "getAll"
+        action: "getTudo"
       });
-      const rl = await apiCall({
-        action: "getLog"
-      });
-      const rc = await apiCall({
-        action: "getCarteira"
-      });
-      const ra = await apiCall({
-        action: "getAgenda"
-      });
-      const ro = await apiCall({
-        action: "getOrdem"
-      });
-      if (r.ok) {
-        const logNuvem = (rl.ok && rl.log) ? normalizarLog(rl.log) : [];
-        const migrados2 = migrarProjetos(rowsToProjects(r.rows), logNuvem);
-        setProjects(arquivarConcluidas(resetRotinas(migrados2), logNuvem));
-        if (rl.ok) setLog(logNuvem);
-        if (rc.ok) setCarteira(rc.carteira || []);
-        if (ra.ok) setAgenda(ra.agenda || []);
-        if (ro.ok) setOrdemDia(ro.ordem || {});
-        firstSave.current = true; // não re-empurra logo após puxar
-        setPullReminder(false); // já puxou, pode mexer
-        setSyncState("ok");
-        setTimeout(() => setSyncState("idle"), 2000);
-      } else throw new Error(r.error);
+      if (!r.ok) throw new Error(r.error || "erro ao puxar");
+      const logNuvem = normalizarLog(r.log || []);
+      const migrados2 = migrarProjetos(rowsToProjects(r.rows || []), logNuvem);
+      setProjects(arquivarConcluidas(resetRotinas(migrados2), logNuvem));
+      setLog(logNuvem);
+      setCarteira(r.carteira || []);
+      setAgenda(r.agenda || []);
+      setOrdemDia(r.ordem || {});
+      revRef.current = r.rev; // versão da nuvem que este aparelho passa a conhecer
+      firstSave.current = true; // não re-empurra logo após puxar
+      setPullReminder(false); // já puxou, pode mexer
+      setAutoState("idle");
+      setSyncState("ok");
+      setTimeout(() => setSyncState("idle"), 2000);
     } catch (e) {
       setFalhouPull(true);
+      setPullErro(String(e && e.message || e));
       setSyncState(e.message === "no-api" ? "noapi" : "err");
-      setTimeout(() => setSyncState("idle"), 3500);
     }
   }
   if (!loaded) return null;
@@ -1799,6 +1838,8 @@ function resetRotinas(list) {
   }), API_URL && pullReminder && /*#__PURE__*/React.createElement(PullOverlay, {
     estado: syncState,
     falhou: falhouPull,
+    erroMsg: pullErro,
+    conflito: autoState === "conflito",
     onPull: () => pull(true),
     onOffline: () => setPullReminder(false)
   }), editing && /*#__PURE__*/React.createElement(EditorModal, {
@@ -1840,9 +1881,14 @@ function Header({
       dot: "var(--lime)"
     },
     err: {
-      txt: "sem conexão",
+      txt: "não salvou — tentando de novo",
       cor: "var(--danger)",
       dot: "var(--danger)"
+    },
+    conflito: {
+      txt: "versão mais nova na nuvem — puxe",
+      cor: "var(--warn)",
+      dot: "var(--warn)"
     }
   }[autoState] || {
     txt: "",
@@ -3395,9 +3441,15 @@ function RecorrenciaProjeto({ rec, dias, diaMes, hora, onChange }) {
 /* ============ OVERLAY DE ABERTURA: PUXAR DA NUVEM ============
    Bloqueia a dashboard até puxar, para nunca mexer numa versão velha
    e sobrescrever a planilha. Some sozinho quando o pull termina. */
-function PullOverlay({ estado, falhou, onPull, onOffline }) {
+function PullOverlay({ estado, falhou, erroMsg, conflito, onPull, onOffline }) {
   const puxando = estado === "saving";
   const erro = estado === "err" || estado === "noapi";
+  const backendVelho = /Ação desconhecida/.test(erroMsg || "");
+  const mensagem = puxando ? "Buscando na nuvem… se o Google demorar, o app tenta de novo sozinho."
+    : erro && backendVelho ? "O backend ainda é a versão antiga: cole o Code.gs novo no Apps Script e publique uma nova versão."
+    : erro ? "Não deu para puxar: o Google demorou ou falhou (" + (erroMsg || "sem resposta") + "). Tente de novo."
+    : conflito ? "Outro aparelho salvou uma versão mais nova. Puxe para continuar — o que foi mudado aqui depois da última sincronização será substituído."
+    : "Traz a versão mais recente antes de você mexer em qualquer coisa.";
   return /*#__PURE__*/React.createElement("div", { className: "pull-overlay" },
     /*#__PURE__*/React.createElement("button", {
       className: "pull-btn",
@@ -3408,10 +3460,8 @@ function PullOverlay({ estado, falhou, onPull, onOffline }) {
       ? [/*#__PURE__*/React.createElement("span", { key: "s", className: "pull-spin" }), "Puxando…"]
       : "↓ Puxar da nuvem"),
     /*#__PURE__*/React.createElement("div", {
-      style: { fontSize: 13, color: erro ? "var(--danger)" : "#e8f0e6cc", textAlign: "center", maxWidth: 300, lineHeight: 1.45 }
-    }, erro
-      ? "Não deu para puxar. Confira a conexão e tente de novo."
-      : "Traz a versão mais recente antes de você mexer em qualquer coisa."),
+      style: { fontSize: 13, color: erro ? "var(--danger)" : conflito ? "var(--warn)" : "#e8f0e6cc", textAlign: "center", maxWidth: 320, lineHeight: 1.45 }
+    }, mensagem),
     falhou && !puxando && /*#__PURE__*/React.createElement("span", {
       onClick: onOffline,
       style: { fontSize: 12, color: "#e8f0e699", cursor: "pointer", textDecoration: "underline", marginTop: 4 }
