@@ -1265,6 +1265,7 @@ function App() {
   const [lojaAberta, setLojaAberta] = useState(null); // null | "loja" | "carteira" | "gerenciar"
   const [toast, setToast] = useState(null); // {txt, id, desfazer?} -> "+20 💎"
   const [agora, setAgora] = useState(Date.now()); // relógio p/ contagem do desbloqueio
+  const [sidebar, setSidebar] = useState(null); // {win, root} da janelinha flutuante
   useEffect(() => {
     const t = setInterval(() => setAgora(Date.now()), 15000);
     return () => clearInterval(t);
@@ -1861,6 +1862,19 @@ function resetRotinas(list) {
     if (!etapaVigente(e.p)) return setEditing({ ref: e.p, ...e.p });
     avancar(e.p, dia);
   }
+  /* ---- SIDEBAR FLUTUANTE ---- */
+  async function alternarSidebar() {
+    if (sidebar) { sidebar.win.close(); return; } // o pagehide limpa o estado
+    if (!PODE_SIDEBAR) return;
+    try {
+      const win = await window.documentPictureInPicture.requestWindow({ width: 150, height: 640 });
+      const root = prepararSidebar(win);
+      win.addEventListener("pagehide", () => setSidebar(null), { once: true });
+      setSidebar({ win, root });
+    } catch (err) {
+      setToast({ txt: "não deu para abrir a sidebar", id: uid() });
+    }
+  }
   function abrirEntrada(e, dia) {
     if (e.item) setAgendando({ item: e.item, dia });
     else if (e.tipo === "projeto") setEditing({ ref: e.p, ...e.p });
@@ -1937,8 +1951,27 @@ function resetRotinas(list) {
     saldo: saldo,
     liberado: liberado,
     agora: agora,
-    onCarteira: () => setLojaAberta("loja")
-  }), view === "checkins" ? /*#__PURE__*/React.createElement(CheckinsView, {
+    onCarteira: () => setLojaAberta("loja"),
+    sidebarAberta: !!sidebar,
+    onSidebar: alternarSidebar
+  }), sidebar && ReactDOM.createPortal(/*#__PURE__*/React.createElement(SidebarFlutuante, {
+    win: sidebar.win,
+    projetos: projetos,
+    rotinas: rotinas,
+    agenda: agenda,
+    log: log,
+    ordemDia: ordemDia,
+    onCotar: cotar,
+    onCotarAvulsa: cotarAv,
+    onTick: tickEntrada,
+    saldo: saldo,
+    liberado: liberado,
+    agora: agora,
+    toast: toast,
+    bloqueado: !!(API_URL && pullReminder),
+    pullState: syncState,
+    onPull: () => pull(true)
+  }), sidebar.root), view === "checkins" ? /*#__PURE__*/React.createElement(CheckinsView, {
     projetos: projetos,
     rotinas: rotinas,
     agenda: agenda,
@@ -2145,7 +2178,9 @@ function Header({
   saldo,
   liberado,
   agora,
-  onCarteira
+  onCarteira,
+  sidebarAberta,
+  onSidebar
 }) {
   // indicador discreto do auto-save
   const auto = {
@@ -2232,7 +2267,13 @@ function Header({
       flexWrap: "wrap",
       justifyContent: "flex-end"
     }
-  }, /*#__PURE__*/React.createElement("button", {
+  }, PODE_SIDEBAR && /*#__PURE__*/React.createElement("button", {
+    className: "btn btn-sm",
+    onClick: onSidebar,
+    title: sidebarAberta ? "Fechar a sidebar flutuante" : "Abrir a sidebar flutuante (fica por cima das outras janelas)",
+    "aria-label": sidebarAberta ? "Fechar sidebar" : "Abrir sidebar",
+    style: sidebarAberta ? { borderColor: "var(--lime)", color: "var(--lime)" } : {}
+  }, "📌"), /*#__PURE__*/React.createElement("button", {
     className: "btn btn-sm",
     onClick: onCarteira,
     title: "Loja de recompensas e carteira",
@@ -4974,6 +5015,183 @@ function EditorModal({
     }
   }, "Excluir"))));
 }
+
+/* ============ SIDEBAR FLUTUANTE (Document Picture-in-Picture) ============
+   Janelinha que fica por cima de tudo no Windows (Chrome/Edge no computador).
+   É renderizada por portal: mesmo React e mesmo estado do app, então marcar aqui
+   é o mesmo tickEntrada da aba Check-ins (grava no Log, paga 💎, sincroniza o Sheets).
+   Só abre por clique (exigência do navegador) e fecha junto com a aba do app. */
+const PODE_SIDEBAR = typeof window !== "undefined" && "documentPictureInPicture" in window;
+const SIDEBAR_CSS = `
+html,body{margin:0;padding:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);
+  font-family:'Sora',system-ui,sans-serif;color-scheme:dark;}
+body{padding-bottom:0 !important;}
+#sb-root{height:100%;}
+.sb{height:100%;display:flex;flex-direction:column;user-select:none;-webkit-user-select:none;}
+.sb-head{flex:none;padding:12px 10px 10px;display:flex;flex-direction:column;align-items:center;gap:7px;border-bottom:1px solid var(--border);}
+.sb-saldo{display:flex;align-items:center;gap:6px;font-size:13.5px;font-weight:700;}
+.sb-saldo.neg{color:var(--danger);}
+.sb-bar{width:100%;max-width:150px;height:4px;border-radius:4px;background:var(--bg-elev2);overflow:hidden;}
+.sb-bar>div{height:100%;border-radius:4px;background:var(--lime);transition:width .3s ease;}
+.sb-prog{font-size:10.5px;color:var(--text-2);}
+.sb-prog.ok{color:var(--lime);font-weight:600;}
+.sb-jogo{font-size:10px;font-weight:600;color:var(--lime);}
+.sb-lista{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:8px 6px 16px;display:flex;flex-direction:column;gap:3px;
+  scrollbar-width:none;-ms-overflow-style:none;overscroll-behavior:contain;}
+.sb-lista::-webkit-scrollbar{display:none;width:0;height:0;}
+.sb-row{flex:none;display:flex;flex-direction:column;align-items:center;padding:5px 6px 4px;border-radius:13px;transition:background .15s ease;}
+.sb-row.aberta{background:var(--bg-elev2);}
+.sb-top{display:flex;align-items:center;gap:10px;transition:opacity .15s ease;}
+.sb-row.feita .sb-top{opacity:.45;}
+.sb-row.feita.aberta .sb-top{opacity:1;}
+.sb-col{display:flex;flex-direction:column;align-items:center;gap:3px;}
+.sb-ic{position:relative;width:42px;height:42px;border-radius:12px;background:var(--bg-elev);border:1px solid var(--border-strong);
+  display:flex;align-items:center;justify-content:center;font-size:20px;line-height:1;transition:border-color .15s,box-shadow .15s;}
+.sb-row.prox .sb-ic{border-color:var(--lime);box-shadow:0 0 0 1px var(--lime);}
+.sb-alerta{position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:50%;background:var(--warn);border:2px solid var(--bg);}
+.sb-hora{font-size:9.5px;font-weight:600;color:var(--text-3);}
+.sb-hora.atrasada{color:var(--warn);}
+.sb-check{font-family:inherit;width:24px;height:24px;margin-bottom:16px;padding:0;border-radius:7px;border:1.5px solid var(--text-3);
+  background:transparent;color:#0b0f0c;display:flex;align-items:center;justify-content:center;cursor:pointer;
+  transition:background .15s,border-color .15s,transform .1s;}
+.sb-check:hover{border-color:var(--lime);}
+.sb-check:active{transform:scale(.9);}
+.sb-check.on{background:var(--lime);border-color:var(--lime);}
+.sb-check.sem{border-color:var(--warn);color:var(--warn);font-size:13px;font-weight:700;}
+.sb-check:focus{outline:none;}
+.sb-check:focus-visible{outline:2px solid var(--lime);outline-offset:2px;}
+.sb-det{width:100%;display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows .2s ease,opacity .2s ease;}
+.sb-row.aberta .sb-det{grid-template-rows:1fr;opacity:1;}
+.sb-det>div{overflow:hidden;min-height:0;}
+.sb-det-in{padding:7px 2px 3px;display:flex;flex-direction:column;gap:3px;text-align:center;}
+.sb-nome{font-size:11.5px;font-weight:700;line-height:1.3;overflow-wrap:anywhere;}
+.sb-row.feita .sb-nome{color:var(--done-text);text-decoration:line-through;}
+.sb-etapa{font-size:10px;line-height:1.35;color:var(--text-2);overflow-wrap:anywhere;}
+.sb-etapa.warn{color:var(--warn);}
+.sb-valor{font-size:10px;font-weight:700;}
+.sb-vazio{margin:auto;padding:20px 12px;text-align:center;font-size:11.5px;line-height:1.5;color:var(--text-3);}
+.sb-puxar{margin:auto;padding:16px 10px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;
+  font-size:11px;line-height:1.45;color:var(--text-2);}
+.sb-puxar button{font-family:inherit;height:36px;padding:0 14px;border:0;border-radius:18px;background:var(--warn);color:#0b0f0c;
+  font-size:12px;font-weight:700;cursor:pointer;}
+.sb-puxar button[disabled]{opacity:.7;cursor:default;}
+.sb-toast{position:fixed;left:8px;right:8px;bottom:10px;padding:7px 10px;border-radius:12px;background:var(--bg-elev2);
+  border:1px solid var(--lime-dim);color:var(--lime);font-size:11px;font-weight:600;line-height:1.35;text-align:center;
+  box-shadow:0 6px 18px #000a;pointer-events:none;animation:sb-in .2s ease;}
+@keyframes sb-in{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+`;
+
+// leva o visual do app para dentro da janelinha (cópia única, feita ao abrir)
+function prepararSidebar(win) {
+  const d = win.document;
+  d.title = "LIFE";
+  document.querySelectorAll('link[rel="stylesheet"], style').forEach(n => d.head.appendChild(n.cloneNode(true)));
+  const st = d.createElement("style");
+  st.textContent = SIDEBAR_CSS;
+  d.head.appendChild(st);
+  const root = d.createElement("div");
+  root.id = "sb-root";
+  d.body.appendChild(root);
+  return root;
+}
+
+const SB_CHECK = ce("svg", {
+  width: 13, height: 13, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+  strokeWidth: 3, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true
+}, ce("path", { d: "M5 12.5l4.5 4.5L19 7" }));
+
+function SidebarFlutuante({ win, projetos, rotinas, agenda, log, ordemDia, onCotar, onCotarAvulsa, onTick,
+  saldo, liberado, agora, toast, bloqueado, pullState, onPull }) {
+  const hoje = todayISO();
+  const fila = useMemo(
+    () => ordenarFila(agendaDoDia(hoje, projetos, rotinas, agenda, log), (ordemDia || {})[hoje]),
+    [hoje, projetos, rotinas, agenda, log, ordemDia]);
+  const [hover, setHover] = useState(null);
+  const [borda, setBorda] = useState({ cima: false, baixo: false });
+  const listaRef = useRef(null);
+  const total = fila.length, feitas = fila.filter(e => e.feita).length;
+  const prox = fila.find(e => !e.feita);
+
+  // sem barra de rolagem: um degradê na borda avisa que tem mais itens para cima/baixo
+  const medir = () => {
+    const el = listaRef.current;
+    if (!el) return;
+    const cima = el.scrollTop > 2, baixo = el.scrollTop + el.clientHeight < el.scrollHeight - 2;
+    setBorda(b => b.cima === cima && b.baixo === baixo ? b : { cima, baixo });
+  };
+  useEffect(medir);
+  useEffect(() => {
+    win.addEventListener("resize", medir);
+    return () => win.removeEventListener("resize", medir);
+  }, [win]);
+  // ao abrir (ou depois de puxar), centraliza o próximo da fila
+  useEffect(() => {
+    const el = listaRef.current && listaRef.current.querySelector(".sb-row.prox");
+    if (el) el.scrollIntoView({ block: "center" });
+  }, [bloqueado]);
+
+  const F = 22;
+  const mascara = borda.cima && borda.baixo
+    ? "linear-gradient(to bottom, transparent 0, #000 " + F + "px, #000 calc(100% - " + F + "px), transparent 100%)"
+    : borda.cima ? "linear-gradient(to bottom, transparent 0, #000 " + F + "px)"
+    : borda.baixo ? "linear-gradient(to bottom, #000 calc(100% - " + F + "px), transparent 100%)" : "none";
+  const pct = total ? Math.round(feitas / total * 100) : 0;
+  const minJogo = liberado ? Math.max(1, Math.ceil((liberado - agora) / 60000)) : 0;
+
+  const linha = e => {
+    const { et, emoji, titulo, partes, valor, atrasada } = infoLinha(e, hoje, log, onCotar, onCotarAvulsa);
+    const semEtapa = e.tipo === "projeto" && !et && !e.feita;
+    const aberta = hover === e.key;
+    const detalhe = semEtapa ? "sem próxima etapa · defina no app"
+      : partes.filter(t => t.indexOf("🔁") !== 0 && t.indexOf("⚠️") !== 0).join(" · ")
+        || (e.tipo === "projeto" && e.feita ? "etapa concluída" : "");
+    const hora = e.hora || (e.tipo === "rotina" ? "rotina" : "—");
+    const valorTxt = (e.feita ? "feito" : atrasada ? "atrasado" : "") + (valor ? (e.feita || atrasada ? " · " : "") + valor.txt : "");
+    const valorCor = e.feita ? "var(--done-text)" : atrasada ? "var(--warn)" : valor ? valor.cor : "var(--text-3)";
+    return ce("div", {
+      key: e.key,
+      className: "sb-row" + (aberta ? " aberta" : "") + (e.feita ? " feita" : "") + (prox && prox.key === e.key ? " prox" : ""),
+      onMouseEnter: () => setHover(e.key),
+      onMouseLeave: () => setHover(h => h === e.key ? null : h)
+    },
+      ce("div", { className: "sb-top" },
+        ce("div", { className: "sb-col" },
+          ce("div", { className: "sb-ic" }, emoji, atrasada && ce("span", { className: "sb-alerta" })),
+          ce("span", { className: "sb-hora" + (atrasada ? " atrasada" : "") }, hora)),
+        ce("button", {
+          className: "sb-check" + (e.feita ? " on" : semEtapa ? " sem" : ""),
+          title: e.feita ? "desfazer" : semEtapa ? "defina a próxima etapa no app" : "marcar como feito",
+          "aria-label": (e.feita ? "Desfazer " : "Marcar ") + titulo,
+          onClick: () => onTick(e, hoje)
+        }, e.feita ? SB_CHECK : semEtapa ? "!" : null)),
+      ce("div", { className: "sb-det", "aria-hidden": !aberta },
+        ce("div", null,
+          ce("div", { className: "sb-det-in" },
+            ce("span", { className: "sb-nome" }, titulo),
+            detalhe && ce("span", { className: "sb-etapa" + (semEtapa ? " warn" : "") }, detalhe),
+            valorTxt && ce("span", { className: "sb-valor", style: { color: valorCor }, title: valor && valor.title || "" }, valorTxt)))));
+  };
+
+  return ce("div", { className: "sb" },
+    ce("div", { className: "sb-head" },
+      ce("div", { className: "sb-saldo" + (saldo < 0 ? " neg" : ""), title: "saldo de 💎" }, ce("span", { className: "gem" }), saldo),
+      total > 0 && ce("div", { className: "sb-bar" }, ce("div", { style: { width: pct + "%" } })),
+      ce("div", { className: "sb-prog" + (total && feitas === total ? " ok" : "") },
+        !total ? "dia livre" : feitas === total ? "dia completo" : feitas + "/" + total + " hoje"),
+      minJogo > 0 && ce("div", { className: "sb-jogo" }, "🎮 " + minJogo + "m")),
+    bloqueado
+      ? ce("div", { className: "sb-puxar" },
+          ce("span", null, pullState === "err" ? "Não deu para puxar. Tente de novo." : "Puxe os dados da nuvem antes de marcar."),
+          ce("button", { onClick: onPull, disabled: pullState === "saving" }, pullState === "saving" ? "Puxando…" : "↓ Puxar"))
+      : !total
+        ? ce("div", { className: "sb-vazio" }, "Nada previsto para hoje")
+        : ce("div", {
+            ref: listaRef, className: "sb-lista", onScroll: medir, onTransitionEnd: medir,
+            style: { maskImage: mascara, WebkitMaskImage: mascara }
+          }, fila.map(linha)),
+    toast && ce("div", { key: toast.id, className: "sb-toast" }, toast.txt));
+}
+
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
 </script>
 </body>
