@@ -3817,7 +3817,7 @@ function LojaModal(props) {
               onAlternar: it => props.onSalvarItem({ ...it, ativo: !it.ativo }),
               onRestaurar: props.onRestaurar
             })
-          : ce(LojaVitrine, { loja, carteira, saldo, onAbrir: setItemId, onGerenciar: () => setAba("gerenciar") })),
+          : ce(LojaVitrine, { loja, carteira, saldo, onAbrir: setItemId, onGerenciar: () => setAba("gerenciar"), onRestaurar: props.onRestaurar })),
 
     item && ce(ItemSheet, {
       item, carteira, saldo, liberado,
@@ -3837,7 +3837,7 @@ function LojaModal(props) {
 }
 
 /* ---- aba Loja: destaque, carrosséis e listas (estilo vitrine) ---- */
-function LojaVitrine({ loja, carteira, saldo, onAbrir, onGerenciar }) {
+function LojaVitrine({ loja, carteira, saldo, onAbrir, onGerenciar, onRestaurar }) {
   const [expandidas, setExpandidas] = useState({}); // carrosséis abertos como lista
   const hoje = todayISO();
   const ativos = loja.filter(x => x.ativo);
@@ -3846,7 +3846,9 @@ function LojaVitrine({ loja, carteira, saldo, onAbrir, onGerenciar }) {
 
   if (!ativos.length) return ce("div", { style: { margin: "8px 16px", padding: 22, textAlign: "center", borderRadius: 16, border: "1px dashed var(--border-strong)" } },
     ce("div", { style: { fontSize: 14, color: "var(--text-2)", marginBottom: 10 } }, "Sua loja está vazia."),
-    ce("button", { className: "btn btn-primary btn-sm", onClick: onGerenciar }, "Criar recompensas"));
+    ce("div", { className: "row", style: { gap: 8, justifyContent: "center", flexWrap: "wrap" } },
+      !loja.length && ce("button", { className: "btn btn-primary btn-sm", onClick: onRestaurar }, "↺ Carregar catálogo padrão"),
+      ce("button", { className: "btn btn-sm" + (loja.length ? " btn-primary" : ""), onClick: onGerenciar }, "Criar recompensas")));
 
   // destaque: o item mais caro que já dá para trocar; se nenhum, o mais perto de dar
   const candidatos = ativos.filter(x => !x.minutos && !st[x.id].esgotado);
