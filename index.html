@@ -91,6 +91,37 @@
   .focus-scroll::-webkit-scrollbar{height:0;}
   .focus-card{scroll-snap-align:start;}
   @media(min-width:640px){.focus-scroll{display:grid;grid-template-columns:repeat(3,1fr);}}
+  /* ---- loja de recompensas ---- */
+  .gem{display:inline-block;width:10px;height:10px;background:var(--lime);clip-path:polygon(22% 0,78% 0,100% 34%,50% 100%,0 34%);flex:none;}
+  .loja{position:fixed;inset:0;z-index:55;background:var(--bg);overflow-y:auto;-webkit-overflow-scrolling:touch;animation:overlay-in .2s ease;}
+  .loja-in{max-width:560px;margin:0 auto;padding-bottom:56px;}
+  .loja-eyebrow{font-size:11.5px;color:#84978a;font-weight:600;letter-spacing:.1em;text-transform:uppercase;}
+  .loja-icbtn{width:44px;height:44px;padding:0;border-radius:14px;border:1px solid var(--border-strong);background:var(--bg-elev);color:var(--text-2);display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none;}
+  .loja-icbtn:hover{color:var(--text);}
+  .loja-saldo{font-family:inherit;height:44px;padding:0 16px;border-radius:22px;border:1px solid var(--border-strong);background:var(--bg-elev);font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px;cursor:pointer;}
+  .loja-abas{margin:0 16px 20px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:4px;border-radius:14px;background:var(--bg-elev);border:1px solid #222c22;}
+  .loja-aba{font-family:inherit;height:38px;border:0;border-radius:10px;background:transparent;color:#84978a;font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;}
+  .loja-aba.on{background:#1d2b17;color:var(--lime);font-weight:700;}
+  .loja-destaque{margin:0 16px;position:relative;overflow:hidden;min-height:212px;box-sizing:border-box;border-radius:22px;background:#15230e;border:1px solid #2b4a1b;padding:20px;display:flex;flex-direction:column;gap:6px;}
+  .loja-btn{font-family:inherit;height:44px;padding:0 18px;border-radius:22px;border:0;background:var(--lime);color:#0b0f0c;font-size:14px;font-weight:700;display:flex;align-items:center;gap:8px;cursor:pointer;}
+  .loja-btn:hover{background:var(--lime-dim);}
+  .loja-link{font-family:inherit;border:0;background:transparent;padding:0;color:var(--lime);font-size:13px;font-weight:600;cursor:pointer;text-align:left;}
+  .loja-link:hover{text-decoration:underline;}
+  .loja-icone{flex:none;box-sizing:border-box;background:var(--bg-elev2);border:1px solid var(--border-strong);display:flex;align-items:center;justify-content:center;line-height:1;}
+  .loja-tile{font-family:inherit;width:86px;flex:none;padding:0;border:0;background:transparent;color:var(--text);text-align:left;display:flex;flex-direction:column;gap:7px;cursor:pointer;}
+  .loja-tile:hover .loja-icone{border-color:var(--lime-dim);}
+  .loja-row{font-family:inherit;width:100%;display:flex;align-items:center;gap:12px;padding:10px 0;border:0;background:transparent;color:var(--text);text-align:left;cursor:pointer;}
+  .loja-row:hover .loja-icone{border-color:var(--lime-dim);}
+  .loja-preco{flex:none;height:34px;padding:0 14px;border-radius:17px;background:#1f2b1a;color:var(--lime);font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;}
+  .loja-mini{font-family:inherit;width:32px;height:32px;flex:none;padding:0;border-radius:9px;border:1px solid transparent;background:transparent;color:var(--text-2);display:flex;align-items:center;justify-content:center;cursor:pointer;}
+  .loja-mini:hover{background:var(--card-hover);color:var(--text);}
+  .loja-mini[disabled]{color:var(--border-strong);cursor:default;background:transparent;}
+  .loja-switch{flex:none;width:40px;height:24px;padding:2px;border-radius:12px;border:0;background:var(--border-strong);cursor:pointer;display:flex;transition:background .15s;}
+  .loja-switch span{width:20px;height:20px;border-radius:50%;background:var(--text-2);transition:transform .15s;}
+  .loja-switch.on{background:var(--lime-dim);}
+  .loja-switch.on span{transform:translateX(16px);background:#0b0f0c;}
+  .hscroll{display:flex;overflow-x:auto;scrollbar-width:none;}
+  .hscroll::-webkit-scrollbar{display:none;}
 </style>
 </head>
 <body>
@@ -623,18 +654,20 @@ const ESFORCOS = [
   { id: "pesada", nome: "Pesada", gemas: 35, dica: "60+ min" }
 ];
 const ECON = {
-  carteiraMax: 400,      // acima disso não acumula (não há teto de ganho por dia)
+  carteiraMax: 520,      // acima disso não acumula (não há teto de ganho por dia)
   passadasPagasDia: 2,   // por projeto; as seguintes contam progresso, mas pagam 0
   multTeto: 2,
-  multPorFalta: 0.25,    // recorrentes: por dia previsto que ficou sem check-in
+  multPorFalta: 0.25,    // dia previsto (diária, dias fixos, dia do mês) que ficou sem check-in
+  multPorSemana: 0.5,    // semanal sem dia fixo e rotina semanal: por semana inteira sem check-in
+  multPorMes: 1,         // mensal sem dia fixo: por mês inteiro sem check-in
   multPorDia: 0.1,       // sem recorrência: por dia parado além da carência
   carenciaDias: 3,
   bonusMinPassadas: 3,   // etapa precisa ter pelo menos 3 passadas para dar bônus
   janelaDias: 60,        // quanto para trás o multiplicador olha
-  precoMin: 2.25,        // 💎 por minuto de jogo (arredonda pra cima por compra)
-  pacotes: [15, 30, 60],
+  precoMin: 2.925,       // 💎 por minuto de jogo na emergência (+30% em out/2026)
   emergenciaMin: 30,     // 1x por semana; pode deixar o saldo negativo
-  pausaMaxDias: 7
+  pausaMaxDias: 7,
+  taxaSaque: 0.2         // tirar 💎 do cofre devolve só 80%
 };
 const precoJogo = minutos => Math.ceil(minutos * ECON.precoMin);
 const esforcoDe = p => p.tipo === "Rotina" ? ESFORCOS[0] : (ESFORCOS.find(e => e.id === p.esforco) || ESFORCOS[1]);
@@ -648,6 +681,30 @@ function ultimoCheckinAntes(log, projeto, dia) {
   return u;
 }
 
+/* Como medir a falta de um projeto:
+   - "pontual": tem dia certo (diária, dias fixos da semana, dia do mês, rotina diária) -> conta dias previstos
+   - "semana": semanal sem dia fixo ou rotina semanal -> conta semanas inteiras sem check-in
+   - "mes": mensal sem dia fixo -> conta meses inteiros sem check-in
+   - "livre": sem recorrência -> conta dias parados depois da carência */
+function modoFalta(p) {
+  if (p.tipo === "Rotina") return p.rotinaFreq === "Semanal" ? "semana" : "pontual";
+  const r = recorrenciaDe(p);
+  if (!r) return "livre";
+  if (r === "semanal" && !(p.dias || []).length) return "semana";
+  if (r === "mensal" && !Number(p.diaMes || 0)) return "mes";
+  return "pontual";
+}
+const proxMes = m => {
+  let y = Number(m.slice(0, 4)), mo = Number(m.slice(5, 7)) + 1;
+  if (mo > 12) { mo = 1; y++; }
+  return y + "-" + String(mo).padStart(2, "0");
+};
+// um período inteiro em pausa não conta como falta
+function periodoTodoEmPausa(pausas, de, ate) {
+  for (let d = de; d <= ate; d = somaDias(d, 1)) if (!emPausa(pausas, d)) return false;
+  return true;
+}
+
 /* Multiplicador de falta de uma passada feita em `dia`.
    So vale na 1a passada do dia no projeto; dias em pausa nao contam. */
 function multFalta(p, log, dia, pausas) {
@@ -655,15 +712,29 @@ function multFalta(p, log, dia, pausas) {
   const ultimo = ultimoCheckinAntes(log, p.projeto, dia);
   if (!ultimo) return 1; // projeto sem historico: nada esta "em falta" ainda
   const limite = somaDias(dia, -ECON.janelaDias);
-  const inicio = somaDias(ultimo > limite ? ultimo : limite, 1);
-  const rotinaDiaria = p.tipo === "Rotina" && p.rotinaFreq !== "Semanal";
-  const regra = rotinaDiaria ? { recorrencia: "diaria" } : p;
+  const desde = ultimo > limite ? ultimo : limite;
+  const inicio = somaDias(desde, 1);
+  const modo = modoFalta(p);
   let m;
-  if (p.tipo === "Rotina" ? rotinaDiaria : ehRecorrente(p)) {
+  if (modo === "pontual") {
+    const regra = p.tipo === "Rotina" ? { recorrencia: "diaria" } : p;
     let faltas = 0;
     for (let d = inicio; d < dia; d = somaDias(d, 1))
       if (previstoNoDia(regra, d) && !emPausa(pausas, d)) faltas++;
     m = 1 + ECON.multPorFalta * faltas;
+  } else if (modo === "semana") {
+    // semanas entre a do último check-in e a atual (a semana atual ainda está em aberto)
+    let faltas = 0;
+    const atual = chaveSemanaISO(dia);
+    for (let s = somaDias(chaveSemanaISO(desde), 7); s < atual; s = somaDias(s, 7))
+      if (!periodoTodoEmPausa(pausas, s, somaDias(s, 6))) faltas++;
+    m = 1 + ECON.multPorSemana * faltas;
+  } else if (modo === "mes") {
+    let faltas = 0;
+    const atual = chaveMes(dia);
+    for (let mm = proxMes(chaveMes(desde)); mm < atual; mm = proxMes(mm))
+      if (!periodoTodoEmPausa(pausas, mm + "-01", mm + "-" + String(diasNoMesDe(mm + "-01")).padStart(2, "0"))) faltas++;
+    m = 1 + ECON.multPorMes * faltas;
   } else {
     let parados = 0;
     for (let d = inicio; d <= dia; d = somaDias(d, 1))
@@ -691,7 +762,7 @@ function cotarPassada(p, log, carteira, dia, pausas) {
   return { base, mult, nominal, gemas, motivo };
 }
 
-/* Carteira: { id, criadoEm, tipo: "jogo"|"emergencia"|"pausa", minutos, gemas, inicio, fim }
+/* Carteira: { id, criadoEm, tipo: "jogo"|"emergencia"|"pausa"|"loja"|"cofre"|"saque", minutos, gemas, inicio, fim, itemId, nome, cofre }
    jogo/emergencia usam data-hora ISO; pausa usa yyyy-mm-dd. */
 const pausasDe = carteira => (carteira || []).filter(c => c.tipo === "pausa");
 const ehDesbloqueio = c => c.tipo === "jogo" || c.tipo === "emergencia";
@@ -712,6 +783,112 @@ function liberadoAte(carteira, agora) {
 }
 const emergenciaNaSemana = (carteira, hoje) => (carteira || []).some(c =>
   c.tipo === "emergencia" && chaveSemanaISO(dataLocalDe(c.criadoEm)) === chaveSemanaISO(hoje));
+
+/* ============ LOJA DE RECOMPENSAS ============
+   O catálogo é seu (aba Loja no Sheets) e é editado na aba Gerenciar.
+   Cada troca fica na Carteira, então o saldo continua sempre derivado:
+   - "loja":  troca de item (gemas = saiu do saldo, cofre = saiu do cofre do item)
+   - "jogo":  item com minutos > 0 libera os jogos no PC, igual às compras antigas
+   - "cofre": 💎 guardadas para um item caro (saem do saldo, então não travam no teto)
+   - "saque": tirar do cofre devolve só 80% (gemas negativo = voltou para o saldo) */
+const PERIODOS = [
+  { id: "", nome: "sem limite" },
+  { id: "semana", nome: "por semana" },
+  { id: "mes", nome: "por mês" }
+];
+const lj = (id, categoria, emoji, nome, preco, limite, periodo, descricao, minutos) => ({
+  id, categoria, emoji, nome, preco,
+  limite: limite || 0, periodo: periodo || "", descricao: descricao || "", minutos: minutos || 0, ativo: true
+});
+// catálogo inicial (preços +30% em out/2026); depois disso a loja é toda sua
+const LOJA_PADRAO = [
+  lj("l-snack", "Comida", "🍫", "Snack gostoso", 55, 3, "semana", "chocolate bom, açaí, pastel"),
+  lj("l-cafe", "Comida", "☕", "Café especial", 60, 2, "semana", "café caprichado ou padaria boa"),
+  lj("l-sobremesa", "Comida", "🍰", "Sobremesa", 80, 2, "semana", "de restaurante, caprichada"),
+  lj("l-ingrediente", "Comida", "🥩", "Ingrediente premium", 120, 1, "semana", "picanha, queijo bom, vinho"),
+  lj("l-delivery", "Comida", "🛵", "Delivery livre", 170, 1, "semana", "o que quiser, sem olhar o cardápio fit"),
+  lj("l-refeicao", "Comida", "🍔", "Refeição livre", 210, 2, "semana", "planejada e sem culpa"),
+  lj("l-jogo15", "Tela e descanso", "🎮", "Jogo · 15 min", 44, 0, "", "libera os jogos no PC", 15),
+  lj("l-jogo30", "Tela e descanso", "🎮", "Jogo · 30 min", 88, 0, "", "libera os jogos no PC", 30),
+  lj("l-jogo60", "Tela e descanso", "🎮", "Jogo · 1h", 176, 0, "", "libera os jogos no PC", 60),
+  lj("l-serie", "Tela e descanso", "📺", "Episódio de série", 130, 0, "", "~45 min"),
+  lj("l-cochilo", "Tela e descanso", "😴", "Cochilo de 1h", 80, 2, "semana", "sem culpa"),
+  lj("l-manha", "Tela e descanso", "⏰", "Manhã sem despertador", 160, 1, "semana"),
+  lj("l-tarde", "Tela e descanso", "🛋️", "Tarde vazia", 325, 2, "mes", "um bloco sem nenhuma tarefa produtiva"),
+  lj("l-sauna", "Autocuidado e hobby", "🧖", "Sauna ou spa caseiro", 80, 0, ""),
+  lj("l-hobby", "Autocuidado e hobby", "🎨", "1h de hobby “inútil”", 95, 0, "", "só por diversão"),
+  lj("l-barbeiro", "Autocuidado e hobby", "💈", "Barbeiro caprichado", 160, 1, "mes"),
+  lj("l-livro", "Autocuidado e hobby", "📖", "Livro novo", 195, 2, "mes", "fora do trabalho"),
+  lj("l-massagem", "Autocuidado e hobby", "💆", "Massagem", 365, 1, "mes"),
+  lj("l-tenis", "Autocuidado e hobby", "👟", "Roupa ou tênis de treino", 455, 1, "mes"),
+  lj("l-passeio", "Experiências", "🥾", "Passeio ou trilha", 235, 0, "", "no fim de semana"),
+  lj("l-cinema", "Experiências", "🎬", "Cinema", 260, 2, "mes"),
+  lj("l-restaurante", "Experiências", "🍽️", "Restaurante novo", 290, 2, "mes"),
+  lj("l-equipamento", "Experiências", "🎸", "Equipamento de hobby", 520, 0, ""),
+  lj("l-curso", "Experiências", "🎓", "Curso", 650, 0, "", "fora do trabalho"),
+  lj("l-show", "Experiências", "🎟️", "Show ou jogo no estádio", 780, 0, ""),
+  lj("l-viagem", "Experiências", "✈️", "Viagem curta", 1950, 0, "")
+];
+const normalizarLoja = loja => (loja || []).map(it => ({
+  id: String(it.id || uid()),
+  categoria: String(it.categoria || "Outros"),
+  emoji: String(it.emoji || "🎁"),
+  nome: String(it.nome || "Sem nome"),
+  descricao: String(it.descricao || ""),
+  preco: Math.max(0, Math.round(Number(it.preco) || 0)),
+  limite: Math.max(0, Math.round(Number(it.limite) || 0)),
+  periodo: it.periodo === "mes" || it.periodo === "semana" ? it.periodo : "",
+  minutos: Math.max(0, Math.round(Number(it.minutos) || 0)),
+  ativo: it.ativo !== false
+}));
+const categoriasDaLoja = loja => {
+  const out = [];
+  (loja || []).forEach(it => { if (out.indexOf(it.categoria) === -1) out.push(it.categoria); });
+  return out;
+};
+const noPeriodo = (dia, periodo, hoje) =>
+  periodo === "mes" ? chaveMes(dia) === chaveMes(hoje) : chaveSemanaISO(dia) === chaveSemanaISO(hoje);
+const ehTroca = c => c.tipo === "loja" || (c.tipo === "jogo" && !!c.itemId);
+function usosNoPeriodo(carteira, item, hoje) {
+  if (!item.limite || !item.periodo) return 0;
+  return (carteira || []).filter(c => c.itemId === item.id && ehTroca(c) &&
+    noPeriodo(dataLocalDe(c.criadoEm), item.periodo, hoje)).length;
+}
+// 💎 guardadas no cofre de um item (depósitos menos o que já saiu em trocas e saques)
+const cofreDe = (carteira, itemId) => (carteira || []).reduce((s, c) => {
+  if (c.itemId !== itemId) return s;
+  return c.tipo === "cofre" ? s + (c.gemas || 0) : s - (c.cofre || 0);
+}, 0);
+const totalNoCofre = carteira =>
+  (carteira || []).reduce((s, c) => s + (c.tipo === "cofre" ? (c.gemas || 0) : -(c.cofre || 0)), 0);
+const quandoVolta = periodo => periodo === "mes" ? "volta dia 1" : "volta segunda";
+const textoLimite = (item, usos) => !item.limite || !item.periodo ? ""
+  : item.limite + (item.periodo === "mes" ? " por mês" : " por semana") +
+    (usos ? " · resta " + Math.max(0, item.limite - usos) : "");
+
+// tudo que a tela precisa saber de um item agora
+function statusItem(item, carteira, saldo, hoje) {
+  const usos = usosNoPeriodo(carteira, item, hoje);
+  const esgotado = !!(item.limite && item.periodo && usos >= item.limite);
+  const cofre = Math.max(0, cofreDe(carteira, item.id));
+  const disponivel = Math.max(0, saldo) + cofre;
+  const doCofre = Math.min(cofre, item.preco);
+  return {
+    usos, esgotado, cofre, doCofre,
+    doSaldo: item.preco - doCofre,
+    pode: !esgotado && disponivel >= item.preco,
+    falta: Math.max(0, item.preco - disponivel),
+    soCofre: item.preco > ECON.carteiraMax // não cabe na carteira: só sai pelo cofre
+  };
+}
+// legenda curta embaixo do nome do item
+function legendaItem(item, st) {
+  if (st.esgotado) return "esgotado · " + quandoVolta(item.periodo);
+  if (st.cofre > 0) return "no cofre: " + st.cofre + " de " + item.preco;
+  if (item.limite && item.periodo) return textoLimite(item, st.usos);
+  if (st.soCofre) return "junte no cofre";
+  return item.descricao || (item.minutos ? "libera os jogos no PC" : "");
+}
 
 /* ============ AGENDA ============
    Compromisso: { id, titulo, data, hora, duracao, projId, esforco, repetir, dias, excecoes }
@@ -1084,8 +1261,9 @@ function App() {
   const [agendando, setAgendando] = useState(null); // {data} = novo | {item, dia} = editar
   const [ordenacao, setOrdenacao] = useState("personalizada"); // "recompensa" | "personalizada"
   const [ordemDia, setOrdemDia] = useState({}); // { "yyyy-mm-dd": [keys] } ordem arrastada na aba Check-ins
-  const [carteiraAberta, setCarteiraAberta] = useState(false);
-  const [toast, setToast] = useState(null); // {txt, id} -> "+20 💎"
+  const [loja, setLoja] = useState(LOJA_PADRAO); // catálogo de recompensas (editável)
+  const [lojaAberta, setLojaAberta] = useState(null); // null | "loja" | "carteira" | "gerenciar"
+  const [toast, setToast] = useState(null); // {txt, id, desfazer?} -> "+20 💎"
   const [agora, setAgora] = useState(Date.now()); // relógio p/ contagem do desbloqueio
   useEffect(() => {
     const t = setInterval(() => setAgora(Date.now()), 15000);
@@ -1093,7 +1271,7 @@ function App() {
   }, []);
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 2800);
+    const t = setTimeout(() => setToast(null), toast.desfazer ? 7000 : 2800);
     return () => clearTimeout(t);
   }, [toast]);
   const dirty = useRef(false);
@@ -1115,6 +1293,7 @@ function App() {
         setAgenda(data.agenda || []);
         setOrdenacao(data.ordenacao || "personalizada");
         setOrdemDia(data.ordemDia || {});
+        if (Array.isArray(data.loja)) setLoja(normalizarLoja(data.loja));
       } catch (e) {}
     }
     setLoaded(true);
@@ -1131,10 +1310,11 @@ function App() {
       agenda,
       ordenacao,
       ordemDia,
+      loja,
       savedAt: Date.now()
     }));
     dirty.current = true;
-  }, [projects, log, ordemCat, carteira, agenda, ordenacao, ordemDia, loaded]);
+  }, [projects, log, ordemCat, carteira, agenda, ordenacao, ordemDia, loja, loaded]);
 
   /* Auto-push pro Sheets: uma chamada só (syncTudo), nunca duas ao mesmo tempo.
      - estadoRef: a gravação sempre manda o estado MAIS RECENTE, não o de quando foi agendada
@@ -1142,7 +1322,7 @@ function App() {
      - revRef: versão da nuvem que este aparelho conhece; se outro aparelho gravou depois,
        o servidor recusa (conflito) e o app pede para puxar, em vez de sobrescrever */
   const estadoRef = useRef(null);
-  estadoRef.current = { projects, log, carteira, agenda, ordemDia };
+  estadoRef.current = { projects, log, carteira, agenda, ordemDia, loja };
   const revRef = useRef(null);
   const gravando = useRef(false);
   const gravarDeNovo = useRef(false);
@@ -1166,7 +1346,8 @@ function App() {
           log: s.log,
           carteira: s.carteira,
           agenda: s.agenda,
-          ordem: s.ordemDia
+          ordem: s.ordemDia,
+          loja: s.loja
         });
         if (!r.ok) {
           if (r.conflito) {
@@ -1205,7 +1386,7 @@ function App() {
     return () => {
       if (pushTimer.current) clearTimeout(pushTimer.current);
     };
-  }, [projects, log, carteira, agenda, ordemDia, loaded]);
+  }, [projects, log, carteira, agenda, ordemDia, loja, loaded]);
 
   /* Rotinas voltam ao zero quando vira o dia (ou a semana). */
 function resetRotinas(list) {
@@ -1557,6 +1738,94 @@ function resetRotinas(list) {
       .map(c => c.tipo === "pausa" && c.inicio < hoje && c.fim >= hoje ? { ...c, fim: somaDias(hoje, -1) } : c));
   }
 
+  /* ---- LOJA ---- */
+  const agoraISO = () => new Date().toISOString();
+  function removerCarteira(id) {
+    setCarteira(prev => prev.filter(c => c.id !== id));
+    setToast(null);
+    setAgora(Date.now());
+  }
+  // troca um item: usa primeiro o cofre do item, o resto sai do saldo
+  function trocarItem(item) {
+    const st = statusItem(item, carteira, saldo, todayISO());
+    if (!st.pode) return false;
+    const id = uid();
+    let entrada = {
+      id, criadoEm: agoraISO(), tipo: "loja", minutos: 0, gemas: st.doSaldo,
+      inicio: "", fim: "", itemId: item.id, nome: item.nome, cofre: st.doCofre
+    };
+    if (item.minutos > 0) {
+      // libera os jogos; se já houver desbloqueio, emenda no fim dele
+      const inicioMs = liberadoAte(carteira) || Date.now();
+      entrada = {
+        ...entrada, tipo: "jogo", minutos: item.minutos,
+        inicio: new Date(inicioMs).toISOString(),
+        fim: new Date(inicioMs + item.minutos * 60000).toISOString()
+      };
+    }
+    setCarteira(prev => [...prev, entrada]);
+    setAgora(Date.now());
+    setToast({ txt: item.emoji + " " + item.nome + " · −" + item.preco + " 💎", id: uid(), desfazer: () => removerCarteira(id) });
+    return true;
+  }
+  function depositarCofre(item, valor) {
+    const v = Math.min(Math.floor(valor), saldo);
+    if (v <= 0) return;
+    const id = uid();
+    setCarteira(prev => [...prev, {
+      id, criadoEm: agoraISO(), tipo: "cofre", minutos: 0, gemas: v,
+      inicio: "", fim: "", itemId: item.id, nome: item.nome, cofre: 0
+    }]);
+    setToast({ txt: "🏦 +" + v + " no cofre · " + item.nome, id: uid(), desfazer: () => removerCarteira(id) });
+  }
+  // semTaxa: quando o item é excluído, o cofre volta inteiro
+  function sacarCofre(item, semTaxa) {
+    const g = Math.max(0, cofreDe(carteira, item.id));
+    if (!g) return;
+    const volta = semTaxa ? g : Math.floor(g * (1 - ECON.taxaSaque));
+    setCarteira(prev => [...prev, {
+      id: uid(), criadoEm: agoraISO(), tipo: "saque", minutos: 0, gemas: -volta,
+      inicio: "", fim: "", itemId: item.id, nome: item.nome, cofre: g
+    }]);
+    setToast({ txt: "↩ +" + volta + " 💎 de volta ao saldo" + (g > volta ? " · taxa " + (g - volta) : ""), id: uid() });
+  }
+  // item novo entra no fim da sua categoria; item editado fica onde está
+  function salvarItemLoja(item) {
+    setLoja(prev => {
+      if (prev.some(x => x.id === item.id)) return prev.map(x => x.id === item.id ? item : x);
+      let ultimo = -1;
+      prev.forEach((x, i) => { if (x.categoria === item.categoria) ultimo = i; });
+      if (ultimo === -1) return [...prev, item];
+      const n = [...prev];
+      n.splice(ultimo + 1, 0, item);
+      return n;
+    });
+  }
+  function excluirItemLoja(item) {
+    if (cofreDe(carteira, item.id) > 0) sacarCofre(item, true);
+    setLoja(prev => prev.filter(x => x.id !== item.id));
+  }
+  // sobe/desce dentro da mesma categoria
+  function moverItemLoja(item, dir) {
+    setLoja(prev => {
+      const arr = [...prev];
+      const i = arr.findIndex(x => x.id === item.id);
+      let j = i + dir;
+      while (j >= 0 && j < arr.length && arr[j].categoria !== item.categoria) j += dir;
+      if (i === -1 || j < 0 || j >= arr.length) return prev;
+      const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+      return arr;
+    });
+  }
+  // devolve à loja os itens padrão que você apagou (não mexe nos que existem)
+  function restaurarPadrao() {
+    setLoja(prev => {
+      const tem = {};
+      prev.forEach(x => { tem[x.id] = true; });
+      return [...prev, ...LOJA_PADRAO.filter(x => !tem[x.id])];
+    });
+  }
+
   /* ---- AGENDA ---- */
   const cotarAv = (item, dia) => cotarAvulsa(item, log, carteira, dia || todayISO());
   function salvarAgenda(item) {
@@ -1640,6 +1909,8 @@ function resetRotinas(list) {
       setCarteira(r.carteira || []);
       setAgenda(r.agenda || []);
       setOrdemDia(r.ordem || {});
+      // aba Loja ainda não existe na planilha (null): fica o catálogo deste aparelho
+      if (Array.isArray(r.loja)) setLoja(normalizarLoja(r.loja));
       revRef.current = r.rev; // versão da nuvem que este aparelho passa a conhecer
       firstSave.current = true; // não re-empurra logo após puxar
       setPullReminder(false); // já puxou, pode mexer
@@ -1666,7 +1937,7 @@ function resetRotinas(list) {
     saldo: saldo,
     liberado: liberado,
     agora: agora,
-    onCarteira: () => setCarteiraAberta(true)
+    onCarteira: () => setLojaAberta("loja")
   }), view === "checkins" ? /*#__PURE__*/React.createElement(CheckinsView, {
     projetos: projetos,
     rotinas: rotinas,
@@ -1804,27 +2075,40 @@ function resetRotinas(list) {
       setAviso(null);
     },
     onFechar: () => setAviso(null)
-  }), carteiraAberta && /*#__PURE__*/React.createElement(CarteiraModal, {
+  }), lojaAberta && /*#__PURE__*/React.createElement(LojaModal, {
+    aba: lojaAberta,
+    setAba: setLojaAberta,
+    loja: loja,
     log: log,
     carteira: carteira,
     saldo: saldo,
     liberado: liberado,
     agora: agora,
-    onComprar: min => comprarJogo(min, false),
+    onTrocar: trocarItem,
+    onDepositar: depositarCofre,
+    onSacar: item => sacarCofre(item, false),
+    onSalvarItem: salvarItemLoja,
+    onExcluirItem: excluirItemLoja,
+    onMoverItem: moverItemLoja,
+    onRestaurar: restaurarPadrao,
     onEmergencia: () => comprarJogo(0, true),
     onPausar: pausar,
     onEncerrarPausa: encerrarPausa,
-    onClose: () => setCarteiraAberta(false)
+    onClose: () => setLojaAberta(null)
   }), toast && /*#__PURE__*/React.createElement("div", {
     key: toast.id,
-    className: "fade",
+    className: "fade row",
     style: {
-      position: "fixed", left: "50%", bottom: 22, transform: "translateX(-50%)", zIndex: 60,
+      position: "fixed", left: "50%", bottom: 22, transform: "translateX(-50%)", zIndex: 75,
       background: "var(--bg-elev2)", border: "1px solid var(--lime-dim)", color: "var(--lime)",
-      padding: "9px 16px", borderRadius: 20, fontSize: 13, fontWeight: 600,
-      maxWidth: "calc(100% - 32px)", textAlign: "center", boxShadow: "0 6px 20px #0008"
+      padding: toast.desfazer ? "6px 6px 6px 16px" : "9px 16px", borderRadius: 22, fontSize: 13, fontWeight: 600,
+      gap: 10, width: "max-content", maxWidth: "calc(100% - 32px)", boxShadow: "0 6px 20px #0008"
     }
-  }, toast.txt), !agendando && !editing && !carteiraAberta && /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("span", { style: { minWidth: 0 } }, toast.txt), toast.desfazer && /*#__PURE__*/React.createElement("button", {
+    className: "btn btn-sm",
+    style: { flex: "none", borderRadius: 16, fontWeight: 600 },
+    onClick: toast.desfazer
+  }, "Desfazer")), !agendando && !editing && !lojaAberta && /*#__PURE__*/React.createElement("button", {
     className: "fab-agendar",
     title: "Agendar compromisso",
     onClick: () => setAgendando({ data: todayISO() })
@@ -1951,7 +2235,7 @@ function Header({
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn btn-sm",
     onClick: onCarteira,
-    title: "Carteira e loja de jogos",
+    title: "Loja de recompensas e carteira",
     style: {
       fontWeight: 600,
       borderColor: liberado ? "var(--lime)" : "var(--border-strong)",
@@ -3468,8 +3752,256 @@ function PullOverlay({ estado, falhou, erroMsg, conflito, onPull, onOffline }) {
     }, "continuar offline (sem puxar)"));
 }
 
-/* ============ CARTEIRA + LOJA DE JOGOS ============ */
-function CarteiraModal({ log, carteira, saldo, liberado, agora, onComprar, onEmergencia, onPausar, onEncerrarPausa, onClose }) {
+/* ============ LOJA DE RECOMPENSAS (tela cheia: Loja · Carteira · Gerenciar) ============ */
+const ce = React.createElement;
+const ICONES = {
+  x: ["M6 6l12 12", "M18 6L6 18"],
+  lapis: ["M4 20h4L19 9l-4-4L4 16v4z", "M14 6l4 4"],
+  cima: ["M6 15l6-6 6 6"],
+  baixo: ["M6 9l6 6 6-6"],
+  mais: ["M12 5v14", "M5 12h14"]
+};
+const svgIcone = (nome, tam) => ce("svg", {
+  width: tam || 18, height: tam || 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+  strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true"
+}, ICONES[nome].map((d, i) => ce("path", { key: i, d })));
+const gemaEl = cor => ce("span", { className: "gem", style: cor ? { background: cor } : null });
+const EMOJIS_LOJA = ["🎁", "🍫", "☕", "🍰", "🍔", "🍕", "🍣", "🍦", "🍷", "🥩", "🎮", "📺", "🎬", "😴", "🛋️",
+  "🧖", "💆", "💈", "📖", "🎨", "🎸", "🎻", "👟", "🛍️", "🎟️", "🥾", "🏖️", "✈️", "🎓", "🧩"];
+
+function LojaModal(props) {
+  const { aba, setAba, loja, carteira, saldo, liberado, onClose } = props;
+  const [itemId, setItemId] = useState(null);     // ficha de troca aberta
+  const [editando, setEditando] = useState(null); // item em edição | { novo: true }
+  useEffect(() => {
+    // a página de trás não rola enquanto a loja está aberta
+    const antes = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = antes; };
+  }, []);
+  const item = itemId ? loja.find(x => x.id === itemId) : null;
+  const dataTopo = diaLocal(todayISO()).toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
+  const titulo = aba === "carteira" ? "Carteira" : aba === "gerenciar" ? "Gerenciar" : "Loja";
+  const botaoAba = (id, txt, icone) => ce("button", {
+    key: id,
+    className: "loja-aba" + (aba === id ? " on" : ""),
+    onClick: () => setAba(id)
+  }, icone ? svgIcone(icone, 14) : null, txt);
+
+  return ce("div", { className: "loja", role: "dialog", "aria-label": "Loja de recompensas" },
+    ce("div", { className: "loja-in" },
+      ce("div", { className: "row", style: { justifyContent: "space-between", padding: "18px 16px 0" } },
+        ce("button", { className: "loja-icbtn", "aria-label": "Fechar loja", onClick: onClose }, svgIcone("x")),
+        ce("button", {
+          className: "loja-saldo",
+          "aria-label": "Saldo: " + saldo + " gemas",
+          onClick: () => setAba("carteira"),
+          style: { color: saldo < 0 ? "var(--danger)" : "var(--text)", borderColor: liberado ? "var(--lime-dim)" : "var(--border-strong)" }
+        }, gemaEl(), saldo,
+          liberado && ce("span", { style: { color: "var(--lime)", fontWeight: 500, fontSize: 12 } },
+            "· 🎮 " + Math.max(1, Math.ceil((liberado - props.agora) / 60000)) + "m"))),
+      ce("div", { style: { padding: "10px 16px 14px" } },
+        ce("div", { className: "loja-eyebrow" }, dataTopo),
+        ce("h1", { style: { margin: "2px 0 0", fontSize: 34, fontWeight: 800, letterSpacing: "-.02em" } }, titulo)),
+      ce("div", { className: "loja-abas" },
+        botaoAba("loja", "Loja"), botaoAba("carteira", "Carteira"), botaoAba("gerenciar", "Gerenciar", "lapis")),
+
+      aba === "carteira"
+        ? ce(CarteiraConteudo, { ...props, onAbrirItem: setItemId })
+        : aba === "gerenciar"
+          ? ce(LojaGerenciar, {
+              loja, carteira,
+              onEditar: it => setEditando(it),
+              onNovo: () => setEditando({ novo: true }),
+              onMover: props.onMoverItem,
+              onAlternar: it => props.onSalvarItem({ ...it, ativo: !it.ativo }),
+              onRestaurar: props.onRestaurar
+            })
+          : ce(LojaVitrine, { loja, carteira, saldo, onAbrir: setItemId, onGerenciar: () => setAba("gerenciar") })),
+
+    item && ce(ItemSheet, {
+      item, carteira, saldo, liberado,
+      onTrocar: () => { if (props.onTrocar(item)) setItemId(null); },
+      onDepositar: v => props.onDepositar(item, v),
+      onSacar: () => props.onSacar(item),
+      onClose: () => setItemId(null)
+    }),
+    editando && ce(ItemEditor, {
+      inicial: editando.novo ? null : editando,
+      categorias: categoriasDaLoja(loja),
+      cofre: editando.novo ? 0 : Math.max(0, cofreDe(carteira, editando.id)),
+      onSalvar: props.onSalvarItem,
+      onExcluir: props.onExcluirItem,
+      onClose: () => setEditando(null)
+    }));
+}
+
+/* ---- aba Loja: destaque, carrosséis e listas (estilo vitrine) ---- */
+function LojaVitrine({ loja, carteira, saldo, onAbrir, onGerenciar }) {
+  const [expandidas, setExpandidas] = useState({}); // carrosséis abertos como lista
+  const hoje = todayISO();
+  const ativos = loja.filter(x => x.ativo);
+  const st = {};
+  ativos.forEach(x => { st[x.id] = statusItem(x, carteira, saldo, hoje); });
+
+  if (!ativos.length) return ce("div", { style: { margin: "8px 16px", padding: 22, textAlign: "center", borderRadius: 16, border: "1px dashed var(--border-strong)" } },
+    ce("div", { style: { fontSize: 14, color: "var(--text-2)", marginBottom: 10 } }, "Sua loja está vazia."),
+    ce("button", { className: "btn btn-primary btn-sm", onClick: onGerenciar }, "Criar recompensas"));
+
+  // destaque: o item mais caro que já dá para trocar; se nenhum, o mais perto de dar
+  const candidatos = ativos.filter(x => !x.minutos && !st[x.id].esgotado);
+  const podem = candidatos.filter(x => st[x.id].pode).sort((a, b) => b.preco - a.preco);
+  const perto = candidatos.filter(x => !st[x.id].soCofre).sort((a, b) => st[a.id].falta - st[b.id].falta);
+  const destaque = podem[0] || perto[0] || null;
+  const cats = categoriasDaLoja(ativos);
+
+  return ce("div", { style: { display: "flex", flexDirection: "column", gap: 26 } },
+    destaque && ce(DestaqueLoja, { item: destaque, st: st[destaque.id], saldo, onAbrir }),
+    cats.map((cat, ci) => {
+      const itens = ativos.filter(x => x.categoria === cat);
+      const podeCarrossel = ci % 2 === 0 && itens.length > 2;
+      const carrossel = podeCarrossel && !expandidas[cat];
+      return ce("section", { key: cat, style: { display: "flex", flexDirection: "column", gap: carrossel ? 12 : 4 } },
+        ce("div", { className: "row", style: { justifyContent: "space-between", alignItems: "baseline", padding: "0 16px" } },
+          ce("h2", { style: { margin: 0, fontSize: 19, fontWeight: 700 } }, cat),
+          podeCarrossel
+            ? ce("button", { className: "loja-link", onClick: () => setExpandidas({ ...expandidas, [cat]: !expandidas[cat] }) },
+                expandidas[cat] ? "Ver menos" : "Ver tudo")
+            : ce("span", { style: { fontSize: 12, color: "var(--text-3)" } }, itens.length + (itens.length === 1 ? " item" : " itens"))),
+        carrossel
+          ? ce("div", { className: "hscroll", style: { gap: 14, padding: "0 16px" } },
+              itens.map(it => ce(ItemTile, { key: it.id, item: it, st: st[it.id], onAbrir })))
+          : ce("div", { style: { padding: "0 16px" } },
+              itens.map((it, i) => ce(ItemRow, { key: it.id, item: it, st: st[it.id], onAbrir, ultimo: i === itens.length - 1 }))));
+    }));
+}
+
+function DestaqueLoja({ item, st, saldo, onAbrir }) {
+  const sub = [item.descricao, textoLimite(item, st.usos)].filter(Boolean).join(" · ");
+  return ce("div", { className: "loja-destaque" },
+    ce("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".14em", color: st.pode ? "var(--lime)" : "var(--warn)" } },
+      st.pode ? "DESTAQUE · VOCÊ JÁ PODE" : "QUASE LÁ"),
+    ce("div", { style: { fontSize: 27, fontWeight: 800, letterSpacing: "-.02em", maxWidth: "58%", lineHeight: 1.1 } }, item.nome),
+    sub && ce("div", { style: { fontSize: 13, color: "var(--text-2)", maxWidth: "55%", lineHeight: 1.4 } }, sub),
+    ce("div", { "aria-hidden": "true", style: { position: "absolute", right: 14, top: 30, fontSize: 100, lineHeight: 1 } }, item.emoji),
+    ce("div", { className: "row", style: { marginTop: "auto", gap: 12, position: "relative" } },
+      ce("button", { className: "loja-btn", onClick: () => onAbrir(item.id) },
+        gemaEl("#0b0f0c"), item.preco + (st.pode ? " · Trocar" : " · Ver")),
+      ce("span", { style: { fontSize: 11.5, color: st.pode ? "var(--text-2)" : "var(--warn)" } },
+        st.pode ? "saldo fica " + (saldo - st.doSaldo) : "faltam " + st.falta)));
+}
+
+function ItemTile({ item, st, onAbrir }) {
+  return ce("button", { className: "loja-tile", onClick: () => onAbrir(item.id), style: { opacity: st.esgotado ? .5 : 1 } },
+    ce("span", { className: "loja-icone", style: { width: 86, height: 86, borderRadius: 22, fontSize: 40 } }, item.emoji),
+    ce("span", { style: { fontSize: 12.5, fontWeight: 600, lineHeight: 1.25, height: 32, overflow: "hidden" } }, item.nome),
+    ce("span", { className: "row", style: { gap: 5, fontSize: 12.5, fontWeight: 700, color: st.pode ? "var(--lime)" : "var(--text-3)" } },
+      gemaEl(st.pode ? null : "var(--text-3)"), item.preco),
+    st.esgotado
+      ? ce("span", { style: { fontSize: 10.5, color: "var(--text-3)" } }, "esgotado")
+      : !st.pode && ce("span", { style: { fontSize: 10.5, fontWeight: 600, color: "var(--warn)" } }, "faltam " + st.falta));
+}
+
+function ItemRow({ item, st, onAbrir, ultimo }) {
+  const pct = item.preco ? Math.min(100, Math.round(st.cofre / item.preco * 100)) : 0;
+  return ce("button", {
+    className: "loja-row",
+    onClick: () => onAbrir(item.id),
+    style: { borderBottom: ultimo ? "none" : "1px solid #1c251c", opacity: st.esgotado ? .55 : 1 }
+  },
+    ce("span", { className: "loja-icone", style: { width: 54, height: 54, borderRadius: 15, fontSize: 27 } }, item.emoji),
+    ce("span", { style: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 } },
+      ce("span", { style: { fontSize: 14.5, fontWeight: 600 } }, item.nome),
+      ce("span", { style: { fontSize: 12, color: "var(--text-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, legendaItem(item, st)),
+      st.cofre > 0 && ce("span", { style: { height: 4, borderRadius: 2, background: "var(--bg-elev2)", overflow: "hidden", marginTop: 2 } },
+        ce("span", { style: { display: "block", width: pct + "%", height: "100%", background: "var(--lime)" } }))),
+    st.esgotado
+      ? ce("span", { className: "loja-preco", style: { background: "transparent", color: "var(--text-3)", border: "1px solid var(--border-strong)" } }, "esgotado")
+      : st.pode
+        ? ce("span", { className: "loja-preco" }, gemaEl(), item.preco)
+        : ce("span", { style: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3, flex: "none" } },
+            ce("span", { className: "row", style: { gap: 6, fontSize: 13, fontWeight: 700, color: "var(--text-3)" } }, gemaEl("var(--text-3)"), item.preco),
+            ce("span", { style: { fontSize: 11, fontWeight: 600, color: "var(--warn)" } }, "faltam " + st.falta)));
+}
+
+/* ---- ficha do item: trocar, guardar no cofre, sacar ---- */
+function ItemSheet({ item, carteira, saldo, liberado, onTrocar, onDepositar, onSacar, onClose }) {
+  const st = statusItem(item, carteira, saldo, todayISO());
+  const restante = Math.max(0, item.preco - st.cofre);
+  const usaCofre = !item.minutos && (st.cofre > 0 || item.preco > Math.max(0, saldo) || st.soCofre);
+  const pct = item.preco ? Math.min(100, Math.round(st.cofre / item.preco * 100)) : 0;
+  const volta = Math.floor(st.cofre * (1 - ECON.taxaSaque));
+
+  // valores rápidos para guardar: nunca mais que o saldo nem que o que falta
+  const livre = Math.max(0, saldo);
+  const opcoes = [];
+  [25, 50, 100].forEach(v => { if (v <= livre && v < restante) opcoes.push({ v, txt: "+" + v }); });
+  const ultimo = Math.min(livre, restante);
+  if (ultimo > 0 && opcoes.every(o => o.v !== ultimo))
+    opcoes.push({ v: ultimo, txt: ultimo === restante ? "o que falta (" + ultimo + ")" : "tudo (" + ultimo + ")" });
+
+  const linha = (rotulo, valor, cor) => ce("div", { className: "row", style: { justifyContent: "space-between", fontSize: 13, padding: "5px 0" } },
+    ce("span", { style: { color: "var(--text-3)" } }, rotulo),
+    ce("span", { style: { fontWeight: 600, color: cor || "var(--text)" } }, valor));
+
+  let textoBotao;
+  if (st.esgotado) textoBotao = "Limite atingido · " + quandoVolta(item.periodo);
+  else if (st.pode) textoBotao = "Trocar por " + item.preco + " 💎" + (st.doCofre ? " (" + st.doCofre + " do cofre)" : "");
+  else textoBotao = "Faltam " + st.falta + " 💎";
+
+  return ce("div", { className: "modal-bg", style: { zIndex: 70 }, onClick: onClose },
+    ce("div", { className: "modal", onClick: e => e.stopPropagation(), role: "dialog", "aria-label": item.nome },
+      ce("div", { className: "row", style: { justifyContent: "flex-end" } },
+        ce("button", { className: "loja-icbtn", "aria-label": "Fechar", onClick: onClose, style: { width: 36, height: 36 } }, svgIcone("x", 16))),
+      ce("div", { style: { textAlign: "center", marginTop: -8 } },
+        ce("div", { style: { fontSize: 64, lineHeight: 1.1 } }, item.emoji),
+        ce("div", { style: { fontSize: 21, fontWeight: 800, marginTop: 8, letterSpacing: "-.01em" } }, item.nome),
+        item.descricao && ce("div", { style: { fontSize: 13, color: "var(--text-2)", marginTop: 4 } }, item.descricao),
+        ce("div", { className: "row", style: { justifyContent: "center", gap: 8, marginTop: 12, fontSize: 26, fontWeight: 800 } },
+          ce("span", { className: "gem", style: { width: 15, height: 15 } }), item.preco)),
+
+      ce("div", { style: { marginTop: 16, padding: "8px 14px", borderRadius: 12, background: "var(--bg-elev2)", border: "1px solid var(--border)" } },
+        linha("Seu saldo", saldo + " 💎", saldo < 0 ? "var(--danger)" : null),
+        st.cofre > 0 && linha("No cofre deste item", st.cofre + " 💎", "var(--lime)"),
+        item.limite > 0 && item.periodo && linha("Limite",
+          st.esgotado ? "esgotado · " + quandoVolta(item.periodo) : textoLimite(item, st.usos), st.esgotado ? "var(--warn)" : null),
+        item.minutos > 0 && linha("Jogos", liberado ? "emenda +" + item.minutos + " min no desbloqueio" : "libera por " + fmtDur(item.minutos)),
+        st.pode
+          ? linha("Saldo depois", (saldo - st.doSaldo) + " 💎")
+          : !st.esgotado && linha("Faltam", st.falta + " 💎", "var(--warn)")),
+
+      ce("button", {
+        className: "btn" + (st.pode ? " btn-primary" : ""),
+        disabled: !st.pode,
+        onClick: () => { if (st.pode) onTrocar(); },
+        style: { width: "100%", justifyContent: "center", marginTop: 14, padding: "13px 14px", fontSize: 14, opacity: st.pode ? 1 : .55, cursor: st.pode ? "pointer" : "default" }
+      }, textoBotao),
+
+      usaCofre && ce("div", { style: { marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--border)" } },
+        ce("div", { className: "row", style: { justifyContent: "space-between", marginBottom: 8 } },
+          ce("span", { style: { fontSize: 13.5, fontWeight: 700 } }, "🏦 Cofre deste item"),
+          ce("span", { style: { fontSize: 12, color: "var(--text-3)" } }, st.cofre + " de " + item.preco)),
+        ce("div", { style: { height: 6, borderRadius: 3, background: "var(--bg-elev2)", overflow: "hidden" } },
+          ce("div", { style: { width: pct + "%", height: "100%", background: "var(--lime)" } })),
+        ce("div", { style: { fontSize: 11.5, color: "var(--text-3)", margin: "8px 0 10px", lineHeight: 1.5 } },
+          st.soCofre
+            ? "Custa mais que o teto da carteira (" + ECON.carteiraMax + "): junte aqui aos poucos. O que está no cofre não conta no teto."
+            : "Guarde aos poucos: o que está no cofre sai do saldo e não conta no teto da carteira."),
+        restante > 0 && (opcoes.length
+          ? ce("div", { className: "row", style: { gap: 6, flexWrap: "wrap" } },
+              opcoes.map(o => ce("button", { key: o.txt, className: "btn btn-sm", onClick: () => onDepositar(o.v) }, "🏦 " + o.txt)))
+          : ce("div", { style: { fontSize: 12, color: "var(--text-3)" } }, "Sem saldo para guardar agora.")),
+        st.cofre > 0 && ce("button", {
+          className: "loja-link",
+          style: { marginTop: 12, color: "var(--text-3)", fontWeight: 500 },
+          onClick: () => {
+            if (confirm("Tirar " + st.cofre + " 💎 do cofre? Voltam " + volta + " para o saldo (taxa de " + Math.round(ECON.taxaSaque * 100) + "%).")) onSacar();
+          }
+        }, "Sacar do cofre · recebe " + volta + " (taxa de " + Math.round(ECON.taxaSaque * 100) + "%)"))));
+}
+
+/* ---- aba Carteira: saldo, jogos, emergência, pausa, cofre e movimentos ---- */
+function CarteiraConteudo({ log, carteira, saldo, liberado, agora, loja, onEmergencia, onPausar, onEncerrarPausa, onAbrirItem, setAba }) {
   const hoje = todayISO();
   const [diasPausa, setDiasPausa] = useState(3);
   const ganhoHoje = ganhoNoDia(log, hoje);
@@ -3477,115 +4009,242 @@ function CarteiraModal({ log, carteira, saldo, liberado, agora, onComprar, onEme
   const pausaAtiva = pausasDe(carteira).find(pa => hoje >= pa.inicio && hoje <= pa.fim);
   const hora = ms => new Date(ms).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
   const dataBR = iso => iso.slice(8, 10) + "/" + iso.slice(5, 7);
+  const noCofre = loja.map(it => ({ it, g: Math.max(0, cofreDe(carteira, it.id)) })).filter(x => x.g > 0);
+  const totalCofre = Math.max(0, totalNoCofre(carteira));
 
+  const textoMov = c => c.tipo === "emergencia" ? "🆘 emergência · " + c.minutos + " min"
+    : c.tipo === "jogo" ? "🎮 " + (c.nome || "jogos · " + c.minutos + " min")
+    : c.tipo === "cofre" ? "🏦 cofre · " + c.nome
+    : c.tipo === "saque" ? "↩ saque do cofre · " + c.nome
+    : "🛍️ " + c.nome + (c.cofre ? " (+" + c.cofre + " do cofre)" : "");
   const movimentos = [
-    ...(log || []).slice().reverse().filter(ev => (ev.gemas || 0) + (ev.bonus || 0) > 0).map(ev => ({
+    ...(log || []).filter(ev => (ev.gemas || 0) + (ev.bonus || 0) > 0).map(ev => ({
       data: ev.data,
-      txt: ev.projeto + (ev.bonus ? " · etapa concluída" : ""),
+      txt: (ev.projeto || ev.etapa) + (ev.bonus ? " · etapa concluída" : ""),
       val: (ev.gemas || 0) + (ev.bonus || 0)
     })),
-    ...(carteira || []).slice().reverse().filter(ehDesbloqueio).map(c => ({
-      data: dataLocalDe(c.criadoEm),
-      txt: (c.tipo === "emergencia" ? "🆘 emergência · " : "🎮 jogos · ") + c.minutos + " min",
-      val: -(c.gemas || 0)
+    ...(carteira || []).filter(c => c.tipo !== "pausa").map(c => ({
+      data: dataLocalDe(c.criadoEm), txt: textoMov(c), val: -(c.gemas || 0)
     }))
-  ].sort((a, b) => a.data < b.data ? 1 : a.data > b.data ? -1 : 0).slice(0, 12);
+  ].reverse().sort((a, b) => a.data < b.data ? 1 : a.data > b.data ? -1 : 0).slice(0, 15);
 
-  const secao = txt => /*#__PURE__*/React.createElement("div", {
-    style: { fontSize: 11, fontWeight: 600, color: "var(--text-2)", margin: "18px 0 8px" }
-  }, txt);
+  const secao = txt => ce("div", { style: { fontSize: 11.5, fontWeight: 600, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--text-3)", margin: "22px 0 9px" } }, txt);
 
-  return /*#__PURE__*/React.createElement("div", { className: "modal-bg", onClick: onClose },
-    /*#__PURE__*/React.createElement("div", { className: "modal", onClick: e => e.stopPropagation() },
-      /*#__PURE__*/React.createElement("div", { className: "row", style: { justifyContent: "space-between", marginBottom: 14 } },
-        /*#__PURE__*/React.createElement("span", { style: { fontSize: 16, fontWeight: 600 } }, "💎 Carteira"),
-        /*#__PURE__*/React.createElement("span", { onClick: onClose, style: { cursor: "pointer", color: "var(--text-3)", fontSize: 18 } }, "✕")),
+  return ce("div", { style: { padding: "0 16px" } },
+    ce("div", { style: { padding: 18, borderRadius: 18, background: "var(--bg-elev)", border: "1px solid var(--border-strong)" } },
+      ce("div", { className: "row", style: { justifyContent: "space-between", alignItems: "flex-end" } },
+        ce("div", null,
+          ce("div", { style: { fontSize: 11.5, fontWeight: 600, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--text-3)" } }, "Saldo"),
+          ce("div", { className: "row", style: { gap: 10, marginTop: 4 } },
+            ce("span", { className: "gem", style: { width: 20, height: 20 } }),
+            ce("span", { style: { fontSize: 44, fontWeight: 800, letterSpacing: "-.03em", lineHeight: 1, color: saldo < 0 ? "var(--danger)" : "var(--text)" } }, saldo))),
+        ce("div", { style: { textAlign: "right" } },
+          ce("div", { style: { fontSize: 14, fontWeight: 700, color: "var(--lime)" } }, "+" + ganhoHoje + " hoje"),
+          ce("div", { style: { fontSize: 11.5, color: "var(--text-3)", marginTop: 2 } }, "teto " + ECON.carteiraMax))),
+      ce("div", { style: { height: 6, borderRadius: 3, background: "var(--bg-elev2)", overflow: "hidden", marginTop: 12 } },
+        ce("div", { style: { width: Math.min(100, Math.max(0, saldo) / ECON.carteiraMax * 100) + "%", height: "100%", background: "var(--lime)" } })),
+      saldo < 0 && ce("div", { style: { fontSize: 11.5, color: "var(--danger)", marginTop: 8 } }, "dívida de emergência — os próximos ganhos pagam primeiro")),
 
-      // saldo
-      /*#__PURE__*/React.createElement("div", { style: { textAlign: "center" } },
-        /*#__PURE__*/React.createElement("div", {
-          style: { fontSize: 38, fontWeight: 700, color: saldo < 0 ? "var(--danger)" : "var(--text)", letterSpacing: "-.02em" }
-        }, saldo + " 💎"),
-        /*#__PURE__*/React.createElement("div", { style: { fontSize: 11.5, color: "var(--text-3)", marginTop: 2 } },
-          saldo < 0 ? "dívida de emergência — os próximos ganhos pagam primeiro" : "carteira máx. " + ECON.carteiraMax + " 💎")),
-      /*#__PURE__*/React.createElement("div", { style: { marginTop: 14 } },
-        /*#__PURE__*/React.createElement("div", {
-          className: "row", style: { justifyContent: "space-between", fontSize: 11, color: "var(--text-3)", marginBottom: 5 }
-        }, /*#__PURE__*/React.createElement("span", null, "ganho hoje +" + ganhoHoje + " 💎"),
-          /*#__PURE__*/React.createElement("span", null, "carteira " + Math.max(0, saldo) + " / " + ECON.carteiraMax + " 💎")),
-        /*#__PURE__*/React.createElement("div", { style: { height: 5, background: "var(--bg-elev2)", borderRadius: 4, overflow: "hidden" } },
-          /*#__PURE__*/React.createElement("div", {
-            style: { width: Math.min(100, Math.max(0, saldo) / ECON.carteiraMax * 100) + "%", height: "100%", background: "var(--lime)" }
-          }))),
+    ce("div", {
+      style: {
+        marginTop: 14, padding: "12px 14px", borderRadius: 12, fontSize: 13, fontWeight: 600,
+        background: liberado ? "var(--lime-soft)" : "var(--bg-elev2)",
+        border: "1px solid " + (liberado ? "var(--lime-dim)" : "var(--border-strong)"),
+        color: liberado ? "var(--lime)" : "var(--text-2)"
+      }
+    }, liberado
+      ? "🎮 Jogos liberados até " + hora(liberado) + " · restam " + Math.max(1, Math.ceil((liberado - agora) / 60000)) + " min"
+      : "🔒 Jogos travados",
+      ce("div", { style: { fontSize: 11, fontWeight: 400, color: "var(--text-3)", marginTop: 4 } },
+        "tempo de jogo fica na Loja, em Tela e descanso · ",
+        ce("button", { className: "loja-link", style: { fontSize: 11 }, onClick: () => setAba("loja") }, "ir para a Loja"))),
+    ce("button", {
+      className: "btn",
+      disabled: emergUsada,
+      onClick: () => { if (!emergUsada && confirm("Usar a emergência da semana? São " + ECON.emergenciaMin + " min que viram dívida de " + precoJogo(ECON.emergenciaMin) + " 💎.")) onEmergencia(); },
+      style: { width: "100%", justifyContent: "center", marginTop: 8, opacity: emergUsada ? .45 : 1, cursor: emergUsada ? "default" : "pointer" }
+    }, emergUsada ? "🆘 emergência já usada nesta semana" : "🆘 Emergência · " + ECON.emergenciaMin + " min (vira dívida de " + precoJogo(ECON.emergenciaMin) + ")"),
 
-      // estado dos jogos
-      /*#__PURE__*/React.createElement("div", {
-        style: {
-          marginTop: 16, padding: "11px 13px", borderRadius: 11, fontSize: 13, fontWeight: 600,
-          background: liberado ? "var(--lime-soft)" : "var(--bg-elev2)",
-          border: "1px solid " + (liberado ? "var(--lime-dim)" : "var(--border-strong)"),
-          color: liberado ? "var(--lime)" : "var(--text-2)"
-        }
-      }, liberado
-        ? "🎮 Jogos liberados até " + hora(liberado) + " · restam " + Math.max(1, Math.ceil((liberado - agora) / 60000)) + " min"
-        : "🔒 Jogos travados",
-        /*#__PURE__*/React.createElement("div", { style: { fontSize: 10.5, fontWeight: 400, color: "var(--text-3)", marginTop: 4 } },
-          "a trava automática no PC chega na fase 2 (Cold Turkey) — por enquanto é no esquema de honra")),
+    secao("Cofre de metas" + (totalCofre ? " · " + totalCofre + " 💎 guardadas" : "")),
+    noCofre.length === 0
+      ? ce("div", { style: { fontSize: 12.5, color: "var(--text-3)", lineHeight: 1.5 } },
+          "Nada guardado ainda. Abra um item caro na Loja e toque em 🏦 para começar a juntar.")
+      : noCofre.map(({ it, g }) => ce("button", { key: it.id, className: "loja-row", onClick: () => onAbrirItem(it.id), style: { borderBottom: "1px solid #1c251c" } },
+          ce("span", { className: "loja-icone", style: { width: 46, height: 46, borderRadius: 13, fontSize: 23 } }, it.emoji),
+          ce("span", { style: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 6 } },
+            ce("span", { className: "row", style: { justifyContent: "space-between", gap: 8 } },
+              ce("span", { style: { fontSize: 14, fontWeight: 600 } }, it.nome),
+              ce("span", { style: { fontSize: 12, color: "var(--text-3)", flex: "none" } }, g + " de " + it.preco)),
+            ce("span", { style: { height: 5, borderRadius: 3, background: "var(--bg-elev2)", overflow: "hidden" } },
+              ce("span", { style: { display: "block", width: Math.min(100, Math.round(g / it.preco * 100)) + "%", height: "100%", background: "var(--lime)" } }))))),
 
-      secao(liberado ? "Emendar mais tempo de jogo" : "Comprar tempo de jogo"),
-      /*#__PURE__*/React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 } },
-        ECON.pacotes.map(min => {
-          const custo = precoJogo(min), pode = saldo >= custo;
-          return /*#__PURE__*/React.createElement("button", {
-            key: min,
-            className: "btn" + (pode ? " btn-primary" : ""),
-            disabled: !pode,
-            onClick: () => pode && onComprar(min),
-            style: { flexDirection: "column", gap: 2, justifyContent: "center", padding: "10px 4px", opacity: pode ? 1 : .4, cursor: pode ? "pointer" : "default" }
-          }, /*#__PURE__*/React.createElement("span", { style: { fontSize: 14, fontWeight: 700 } }, (liberado ? "+" : "") + min + " min"),
-            /*#__PURE__*/React.createElement("span", { style: { fontSize: 11 } }, custo + " 💎"));
-        })),
-      /*#__PURE__*/React.createElement("button", {
-        className: "btn",
-        disabled: emergUsada,
-        onClick: () => { if (!emergUsada && confirm("Usar a emergência da semana? São " + ECON.emergenciaMin + " min que viram dívida de " + precoJogo(ECON.emergenciaMin) + " 💎.")) onEmergencia(); },
-        style: { width: "100%", justifyContent: "center", marginTop: 8, opacity: emergUsada ? .45 : 1, cursor: emergUsada ? "default" : "pointer" }
-      }, emergUsada ? "🆘 emergência já usada nesta semana" : "🆘 Emergência · " + ECON.emergenciaMin + " min (vira dívida)"),
+    secao("Pausa (doença, viagem)"),
+    pausaAtiva
+      ? ce("div", { className: "row", style: { gap: 10, justifyContent: "space-between" } },
+          ce("span", { style: { fontSize: 12.5, color: "var(--warn)" } }, "⏸ em pausa até " + dataBR(pausaAtiva.fim) + " — faltas não contam"),
+          ce("button", { className: "btn btn-sm", onClick: onEncerrarPausa }, "encerrar"))
+      : ce("div", { className: "row", style: { gap: 8 } },
+          ce("span", { style: { fontSize: 12, color: "var(--text-3)", flex: "none" } }, "pausar faltas por"),
+          ce("input", {
+            type: "number", min: "1", max: String(ECON.pausaMaxDias), value: diasPausa, "aria-label": "Dias de pausa",
+            onChange: e => setDiasPausa(e.target.value),
+            style: { width: 60, textAlign: "center", padding: "7px 4px" }
+          }),
+          ce("span", { style: { fontSize: 12, color: "var(--text-3)", flex: 1 } }, "dia(s)"),
+          ce("button", {
+            className: "btn btn-sm",
+            onClick: () => { if (confirm("Pausar por " + diasPausa + " dia(s)? Nesses dias nada fica em falta.")) onPausar(diasPausa); }
+          }, "pausar")),
 
-      secao("Pausa (doença, viagem)"),
-      pausaAtiva
-        ? /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 10, justifyContent: "space-between" } },
-            /*#__PURE__*/React.createElement("span", { style: { fontSize: 12.5, color: "var(--warn)" } },
-              "⏸ em pausa até " + dataBR(pausaAtiva.fim) + " — faltas não contam"),
-            /*#__PURE__*/React.createElement("button", { className: "btn btn-sm", onClick: onEncerrarPausa }, "encerrar"))
-        : /*#__PURE__*/React.createElement("div", { className: "row", style: { gap: 8 } },
-            /*#__PURE__*/React.createElement("span", { style: { fontSize: 12, color: "var(--text-3)", flex: "none" } }, "pausar faltas por"),
-            /*#__PURE__*/React.createElement("input", {
-              type: "number", min: "1", max: String(ECON.pausaMaxDias), value: diasPausa,
-              onChange: e => setDiasPausa(e.target.value),
-              style: { width: 60, textAlign: "center", padding: "7px 4px" }
-            }),
-            /*#__PURE__*/React.createElement("span", { style: { fontSize: 12, color: "var(--text-3)", flex: 1 } }, "dia(s)"),
-            /*#__PURE__*/React.createElement("button", {
-              className: "btn btn-sm",
-              onClick: () => { if (confirm("Pausar por " + diasPausa + " dia(s)? Nesses dias nada fica em falta.")) onPausar(diasPausa); }
-            }, "pausar")),
+    secao("Movimentos"),
+    movimentos.length === 0
+      ? ce("div", { style: { fontSize: 12.5, color: "var(--text-3)" } }, "Nenhum movimento ainda. Faça um check-in numa tarefa árdua para ganhar as primeiras 💎.")
+      : movimentos.map((m, i) => ce("div", {
+          key: i, className: "row",
+          style: { gap: 10, padding: "7px 0", borderTop: i ? "1px solid var(--border)" : "none", fontSize: 12.5 }
+        },
+          ce("span", { style: { color: "var(--text-3)", fontSize: 11, width: 38, flex: "none" } }, dataBR(m.data)),
+          ce("span", { style: { flex: 1, minWidth: 0, color: "var(--text-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, m.txt),
+          ce("span", { style: { fontWeight: 700, flex: "none", color: m.val > 0 ? "var(--lime)" : m.val < 0 ? "var(--warn)" : "var(--text-3)" } },
+            (m.val > 0 ? "+" : "") + m.val))));
+}
 
-      secao("Movimentos"),
-      movimentos.length === 0
-        ? /*#__PURE__*/React.createElement("div", { style: { fontSize: 12, color: "var(--text-3)" } },
-            "Nenhum movimento ainda. Faça um check-in numa tarefa árdua para ganhar as primeiras 💎.")
-        : movimentos.map((m, i) => /*#__PURE__*/React.createElement("div", {
-            key: i, className: "row",
-            style: { gap: 10, padding: "6px 0", borderTop: i ? "1px solid var(--border)" : "none", fontSize: 12.5 }
+/* ---- aba Gerenciar: o catálogo é seu ---- */
+function LojaGerenciar({ loja, carteira, onEditar, onNovo, onMover, onAlternar, onRestaurar }) {
+  const cats = categoriasDaLoja(loja);
+  const faltamPadrao = LOJA_PADRAO.filter(p => !loja.some(x => x.id === p.id)).length;
+  const meta = it => [
+    it.preco + " 💎",
+    it.limite && it.periodo ? textoLimite(it, 0) : "",
+    it.minutos ? "libera " + fmtDur(it.minutos) + " de jogo" : "",
+    cofreDe(carteira, it.id) > 0 ? "🏦 " + cofreDe(carteira, it.id) : ""
+  ].filter(Boolean).join(" · ");
+  const setinha = (it, dir, desabilitado) => ce("button", {
+    className: "loja-mini", disabled: desabilitado, "aria-label": dir < 0 ? "Subir " + it.nome : "Descer " + it.nome,
+    onClick: () => onMover(it, dir)
+  }, svgIcone(dir < 0 ? "cima" : "baixo", 15));
+
+  return ce("div", { style: { padding: "0 16px" } },
+    ce("div", { style: { fontSize: 13, color: "var(--text-2)", lineHeight: 1.5 } },
+      "A loja é sua: mude preço, limite e categoria, desligue o que não quer ver agora ou crie recompensas novas."),
+    ce("button", { className: "btn btn-primary", onClick: onNovo, style: { width: "100%", justifyContent: "center", marginTop: 12, padding: "11px 14px" } },
+      svgIcone("mais", 16), "Nova recompensa"),
+    cats.map(cat => {
+      const itens = loja.filter(x => x.categoria === cat);
+      return ce("section", { key: cat, style: { marginTop: 22 } },
+        ce("div", { style: { fontSize: 11.5, fontWeight: 600, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--text-3)", marginBottom: 4 } }, cat),
+        itens.map((it, i) => ce("div", {
+          key: it.id, className: "row",
+          style: { gap: 10, padding: "8px 0", borderBottom: i === itens.length - 1 ? "none" : "1px solid #1c251c" }
+        },
+          ce("span", { className: "loja-icone", style: { width: 42, height: 42, borderRadius: 12, fontSize: 21, opacity: it.ativo ? 1 : .4 } }, it.emoji),
+          ce("button", {
+            onClick: () => onEditar(it),
+            style: { flex: 1, minWidth: 0, border: 0, background: "transparent", padding: 0, textAlign: "left", color: "inherit", fontFamily: "inherit", cursor: "pointer", opacity: it.ativo ? 1 : .5 }
           },
-            /*#__PURE__*/React.createElement("span", { style: { color: "var(--text-3)", fontSize: 11, width: 38, flex: "none" } }, dataBR(m.data)),
-            /*#__PURE__*/React.createElement("span", {
-              style: { flex: 1, minWidth: 0, color: "var(--text-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
-            }, m.txt),
-            /*#__PURE__*/React.createElement("span", {
-              style: { fontWeight: 700, flex: "none", color: m.val > 0 ? "var(--lime)" : "var(--warn)" }
-            }, (m.val > 0 ? "+" : "") + m.val)))));
+            ce("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, it.nome),
+            ce("div", { style: { fontSize: 11.5, color: "var(--text-3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, meta(it))),
+          ce("button", {
+            className: "loja-switch" + (it.ativo ? " on" : ""), role: "switch", "aria-checked": it.ativo ? "true" : "false",
+            "aria-label": (it.ativo ? "Desativar " : "Ativar ") + it.nome, onClick: () => onAlternar(it)
+          }, ce("span", null)),
+          setinha(it, -1, i === 0),
+          setinha(it, 1, i === itens.length - 1),
+          ce("button", { className: "loja-mini", "aria-label": "Editar " + it.nome, onClick: () => onEditar(it) }, svgIcone("lapis", 15)))));
+    }),
+    faltamPadrao > 0 && ce("button", {
+      className: "btn btn-ghost btn-sm", style: { marginTop: 18 },
+      onClick: () => { if (confirm("Devolver à loja " + faltamPadrao + " item(ns) do catálogo padrão que você apagou? Os seus itens não mudam.")) onRestaurar(); }
+    }, "↺ Restaurar " + faltamPadrao + " item(ns) padrão"));
+}
+
+/* ---- editor de uma recompensa ---- */
+function ItemEditor({ inicial, categorias, cofre, onSalvar, onExcluir, onClose }) {
+  const novo = !inicial;
+  const [f, setF] = useState(inicial || {
+    id: uid(), categoria: categorias[0] || "Comida", emoji: "🎁", nome: "", descricao: "",
+    preco: 100, limite: 0, periodo: "", minutos: 0, ativo: true
+  });
+  const [novaCat, setNovaCat] = useState(!categorias.length);
+  const muda = patch => setF(p => ({ ...p, ...patch }));
+  const preco = Math.max(0, parseInt(f.preco) || 0);
+  const pode = String(f.nome || "").trim() && String(f.categoria || "").trim();
+  const passadas = (preco / 20).toFixed(1).replace(".0", "").replace(".", ",");
+
+  function salvar() {
+    if (!pode) return;
+    const periodo = f.periodo || "";
+    const limite = periodo ? Math.max(1, parseInt(f.limite) || 1) : 0;
+    const minutos = f.minutos ? Math.max(1, parseInt(f.minutos) || 30) : 0;
+    onSalvar(normalizarLoja([{ ...f, nome: f.nome.trim(), categoria: f.categoria.trim(), descricao: (f.descricao || "").trim(), preco, periodo, limite, minutos }])[0]);
+    onClose();
+  }
+  const campo = (rotulo, conteudo, dica) => ce("div", { style: { marginBottom: 14 } },
+    ce("label", null, rotulo), conteudo,
+    dica && ce("div", { style: { fontSize: 10.5, color: "var(--text-3)", marginTop: 5 } }, dica));
+
+  return ce("div", { className: "modal-bg", style: { zIndex: 70 }, onClick: onClose },
+    ce("div", { className: "modal", onClick: e => e.stopPropagation(), role: "dialog", "aria-label": novo ? "Nova recompensa" : "Editar recompensa" },
+      ce("div", { className: "row", style: { justifyContent: "space-between", marginBottom: 16 } },
+        ce("span", { style: { fontSize: 16, fontWeight: 600 } }, novo ? "Nova recompensa" : "Editar recompensa"),
+        ce("button", { className: "loja-icbtn", "aria-label": "Fechar", onClick: onClose, style: { width: 36, height: 36 } }, svgIcone("x", 16))),
+
+      ce("div", { className: "row", style: { gap: 10, marginBottom: 14, alignItems: "flex-end" } },
+        ce("div", { style: { width: 72, flex: "none" } },
+          ce("label", { htmlFor: "li-emoji" }, "Ícone"),
+          ce("input", { id: "li-emoji", value: f.emoji, maxLength: 8, onChange: e => muda({ emoji: e.target.value }), style: { textAlign: "center", fontSize: 22, padding: "6px 4px" } })),
+        ce("div", { style: { flex: 1 } },
+          ce("label", { htmlFor: "li-nome" }, "Nome"),
+          ce("input", { id: "li-nome", value: f.nome, autoFocus: novo, placeholder: "Ex: Pizza no domingo", onChange: e => muda({ nome: e.target.value }) }))),
+      ce("div", { className: "row", style: { gap: 4, flexWrap: "wrap", marginTop: -6, marginBottom: 14 } },
+        EMOJIS_LOJA.map(em => ce("button", {
+          key: em, "aria-label": "Usar " + em, onClick: () => muda({ emoji: em }),
+          style: { fontSize: 19, padding: "3px 5px", borderRadius: 8, cursor: "pointer", background: f.emoji === em ? "var(--lime-soft)" : "transparent", border: "1px solid " + (f.emoji === em ? "var(--lime)" : "transparent") }
+        }, em))),
+
+      campo("Descrição (opcional)", ce("input", { value: f.descricao, placeholder: "Ex: sem culpa, planejada", onChange: e => muda({ descricao: e.target.value }) })),
+
+      campo("Categoria", novaCat
+        ? ce("div", { className: "row", style: { gap: 8 } },
+            ce("input", { value: f.categoria, placeholder: "Nome da categoria", onChange: e => muda({ categoria: e.target.value }), "aria-label": "Nova categoria" }),
+            categorias.length > 0 && ce("button", { className: "btn btn-sm", style: { flex: "none" }, onClick: () => { setNovaCat(false); muda({ categoria: categorias[0] }); } }, "usar existente"))
+        : ce("select", {
+            value: f.categoria, "aria-label": "Categoria",
+            onChange: e => { if (e.target.value === "__nova__") { setNovaCat(true); muda({ categoria: "" }); } else muda({ categoria: e.target.value }); }
+          }, categorias.map(c => ce("option", { key: c, value: c }, c)), ce("option", { value: "__nova__" }, "➕ Nova categoria…"))),
+
+      campo("Preço em 💎", ce("input", { type: "number", min: "0", value: f.preco, onChange: e => muda({ preco: e.target.value }), "aria-label": "Preço" }),
+        "≈ " + passadas + " passadas médias (20 💎 cada)" + (preco > ECON.carteiraMax ? " · acima do teto de " + ECON.carteiraMax + ": só sai pelo cofre" : "")),
+
+      campo("Limite", ce("div", { className: "row", style: { gap: 8 } },
+        ce("select", { value: f.periodo || "", "aria-label": "Período do limite", onChange: e => muda({ periodo: e.target.value, limite: e.target.value ? (parseInt(f.limite) || 1) : 0 }) },
+          PERIODOS.map(p => ce("option", { key: p.id || "sem", value: p.id }, p.nome))),
+        f.periodo && ce("input", { type: "number", min: "1", value: f.limite, "aria-label": "Quantas vezes", onChange: e => muda({ limite: e.target.value }), style: { width: 80, flex: "none", textAlign: "center" } }),
+        f.periodo && ce("span", { style: { fontSize: 12, color: "var(--text-3)", flex: "none" } }, "vez(es)")),
+        "o limite zera toda segunda (semana) ou todo dia 1 (mês)"),
+
+      ce("div", { style: { marginBottom: 14, padding: "10px 12px", borderRadius: 10, background: "var(--bg-elev2)", border: "1px solid var(--border)" } },
+        ce("label", { className: "row", style: { gap: 8, margin: 0, cursor: "pointer", fontSize: 13, color: "var(--text)" } },
+          ce("input", { type: "checkbox", checked: !!f.minutos, onChange: e => muda({ minutos: e.target.checked ? 30 : 0 }), style: { width: 18, height: 18, flex: "none" } }),
+          "🎮 Libera os jogos no PC"),
+        !!f.minutos && ce("div", { className: "row", style: { gap: 8, marginTop: 9 } },
+          ce("span", { style: { fontSize: 12, color: "var(--text-3)" } }, "por"),
+          ce("input", { type: "number", min: "1", value: f.minutos, "aria-label": "Minutos de jogo", onChange: e => muda({ minutos: e.target.value }), style: { width: 80, textAlign: "center" } }),
+          ce("span", { style: { fontSize: 12, color: "var(--text-3)" } }, "minutos"))),
+
+      ce("label", { className: "row", style: { gap: 8, cursor: "pointer", fontSize: 13, color: "var(--text)", marginBottom: 6 } },
+        ce("input", { type: "checkbox", checked: f.ativo !== false, onChange: e => muda({ ativo: e.target.checked }), style: { width: 18, height: 18, flex: "none" } }),
+        "Aparece na loja"),
+
+      ce("div", { className: "row", style: { gap: 8, marginTop: 16 } },
+        ce("button", { className: "btn btn-primary", style: { flex: 1, justifyContent: "center", opacity: pode ? 1 : .45 }, onClick: salvar }, "Salvar"),
+        !novo && ce("button", {
+          className: "btn", style: { borderColor: "var(--danger)", color: "var(--danger)" },
+          onClick: () => {
+            const aviso = cofre > 0 ? " As " + cofre + " 💎 do cofre dele voltam inteiras para o saldo." : "";
+            if (confirm("Excluir “" + f.nome + "” da loja?" + aviso)) { onExcluir(inicial); onClose(); }
+          }
+        }, "Excluir"))));
 }
 
 function CalendarioView({ projetos, rotinas, agenda, log, onTick, onAbrir, onCotar, onCotarAvulsa, onNovo }) {
