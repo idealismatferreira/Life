@@ -1863,18 +1863,32 @@ function resetRotinas(list) {
     avancar(e.p, dia);
   }
   /* ---- SIDEBAR FLUTUANTE ---- */
-  async function alternarSidebar() {
-    if (sidebar) { sidebar.win.close(); return; } // o pagehide limpa o estado
+  const lembrarSidebar = v => { try { v ? localStorage.setItem(LS_SIDEBAR, "1") : localStorage.removeItem(LS_SIDEBAR); } catch (e) {} };
+  async function alternarSidebar(automatico) {
+    if (sidebar) { lembrarSidebar(false); sidebar.win.close(); return; } // o pagehide limpa o estado
     if (!PODE_SIDEBAR) return;
     try {
-      const win = await window.documentPictureInPicture.requestWindow({ width: 150, height: 640 });
+      const win = DESKTOP
+        ? window.open("", window.lifeDesktop.sidebar || "life-sidebar")
+        : await window.documentPictureInPicture.requestWindow({ width: 150, height: 640 });
+      if (!win) throw new Error("janela bloqueada");
       const root = prepararSidebar(win);
       win.addEventListener("pagehide", () => setSidebar(null), { once: true });
       setSidebar({ win, root });
+      lembrarSidebar(true);
     } catch (err) {
-      setToast({ txt: "não deu para abrir a sidebar", id: uid() });
+      if (!automatico) setToast({ txt: "não deu para abrir a sidebar", id: uid() });
     }
   }
+  // no LIFE Desktop, a sidebar volta sozinha se estava aberta quando você fechou o programa
+  const sidebarAuto = useRef(false);
+  useEffect(() => {
+    if (!loaded || !DESKTOP || sidebarAuto.current) return;
+    sidebarAuto.current = true;
+    let abrir = false;
+    try { abrir = localStorage.getItem(LS_SIDEBAR) === "1"; } catch (e) {}
+    if (abrir) alternarSidebar(true);
+  }, [loaded]);
   function abrirEntrada(e, dia) {
     if (e.item) setAgendando({ item: e.item, dia });
     else if (e.tipo === "projeto") setEditing({ ref: e.p, ...e.p });
@@ -1953,7 +1967,7 @@ function resetRotinas(list) {
     agora: agora,
     onCarteira: () => setLojaAberta("loja"),
     sidebarAberta: !!sidebar,
-    onSidebar: alternarSidebar
+    onSidebar: () => alternarSidebar()
   }), sidebar && ReactDOM.createPortal(/*#__PURE__*/React.createElement(SidebarFlutuante, {
     win: sidebar.win,
     projetos: projetos,
@@ -1970,7 +1984,9 @@ function resetRotinas(list) {
     toast: toast,
     bloqueado: !!(API_URL && pullReminder),
     pullState: syncState,
-    onPull: () => pull(true)
+    onPull: () => pull(true),
+    desktop: DESKTOP,
+    onFechar: () => alternarSidebar()
   }), sidebar.root), view === "checkins" ? /*#__PURE__*/React.createElement(CheckinsView, {
     projetos: projetos,
     rotinas: rotinas,
@@ -5021,37 +5037,46 @@ function EditorModal({
    É renderizada por portal: mesmo React e mesmo estado do app, então marcar aqui
    é o mesmo tickEntrada da aba Check-ins (grava no Log, paga 💎, sincroniza o Sheets).
    Só abre por clique (exigência do navegador) e fecha junto com a aba do app. */
-const PODE_SIDEBAR = typeof window !== "undefined" && "documentPictureInPicture" in window;
+// no LIFE Desktop (o .exe), a sidebar é uma janela sem moldura do próprio programa
+const DESKTOP = typeof window !== "undefined" && !!window.lifeDesktop;
+const PODE_SIDEBAR = DESKTOP || (typeof window !== "undefined" && "documentPictureInPicture" in window);
+const LS_SIDEBAR = "life_sidebar_aberta";
 const SIDEBAR_CSS = `
 html,body{margin:0;padding:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:'Sora',system-ui,sans-serif;color-scheme:dark;}
 body{padding-bottom:0 !important;}
 #sb-root{height:100%;}
 .sb{height:100%;display:flex;flex-direction:column;user-select:none;-webkit-user-select:none;}
-.sb-head{flex:none;padding:12px 10px 10px;display:flex;flex-direction:column;align-items:center;gap:7px;border-bottom:1px solid var(--border);}
-.sb-saldo{display:flex;align-items:center;gap:6px;font-size:13.5px;font-weight:700;}
+.sb-head{position:relative;flex:none;padding:10px 8px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;border-bottom:1px solid var(--border);}
+.sb.desk .sb-head{padding-top:4px;-webkit-app-region:drag;}
+.sb-alca{width:100%;height:16px;display:flex;align-items:center;justify-content:center;}
+.sb-alca>span{width:22px;height:3px;border-radius:2px;background:var(--border-strong);}
+.sb-fechar{position:absolute;top:2px;right:3px;width:20px;height:20px;padding:0;border:0;border-radius:6px;background:transparent;
+  color:var(--text-3);display:flex;align-items:center;justify-content:center;cursor:pointer;-webkit-app-region:no-drag;}
+.sb-fechar:hover{background:var(--bg-elev2);color:var(--text);}
+.sb-saldo{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:700;}
 .sb-saldo.neg{color:var(--danger);}
 .sb-bar{width:100%;max-width:150px;height:4px;border-radius:4px;background:var(--bg-elev2);overflow:hidden;}
 .sb-bar>div{height:100%;border-radius:4px;background:var(--lime);transition:width .3s ease;}
 .sb-prog{font-size:10.5px;color:var(--text-2);}
 .sb-prog.ok{color:var(--lime);font-weight:600;}
 .sb-jogo{font-size:10px;font-weight:600;color:var(--lime);}
-.sb-lista{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:8px 6px 16px;display:flex;flex-direction:column;gap:3px;
+.sb-lista{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:6px 4px 16px;display:flex;flex-direction:column;gap:2px;
   scrollbar-width:none;-ms-overflow-style:none;overscroll-behavior:contain;}
 .sb-lista::-webkit-scrollbar{display:none;width:0;height:0;}
-.sb-row{flex:none;display:flex;flex-direction:column;align-items:center;padding:5px 6px 4px;border-radius:13px;transition:background .15s ease;}
+.sb-row{flex:none;display:flex;flex-direction:column;align-items:center;padding:4px 4px 3px;border-radius:12px;transition:background .15s ease;}
 .sb-row.aberta{background:var(--bg-elev2);}
-.sb-top{display:flex;align-items:center;gap:10px;transition:opacity .15s ease;}
+.sb-top{display:flex;align-items:center;gap:8px;transition:opacity .15s ease;}
 .sb-row.feita .sb-top{opacity:.45;}
 .sb-row.feita.aberta .sb-top{opacity:1;}
 .sb-col{display:flex;flex-direction:column;align-items:center;gap:3px;}
-.sb-ic{position:relative;width:42px;height:42px;border-radius:12px;background:var(--bg-elev);border:1px solid var(--border-strong);
-  display:flex;align-items:center;justify-content:center;font-size:20px;line-height:1;transition:border-color .15s,box-shadow .15s;}
+.sb-ic{position:relative;width:38px;height:38px;border-radius:11px;background:var(--bg-elev);border:1px solid var(--border-strong);
+  display:flex;align-items:center;justify-content:center;font-size:18px;line-height:1;transition:border-color .15s,box-shadow .15s;}
 .sb-row.prox .sb-ic{border-color:var(--lime);box-shadow:0 0 0 1px var(--lime);}
 .sb-alerta{position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:50%;background:var(--warn);border:2px solid var(--bg);}
-.sb-hora{font-size:9.5px;font-weight:600;color:var(--text-3);}
+.sb-hora{font-size:9px;font-weight:600;color:var(--text-3);}
 .sb-hora.atrasada{color:var(--warn);}
-.sb-check{font-family:inherit;width:24px;height:24px;margin-bottom:16px;padding:0;border-radius:7px;border:1.5px solid var(--text-3);
+.sb-check{font-family:inherit;width:22px;height:22px;margin-bottom:15px;padding:0;border-radius:7px;border:1.5px solid var(--text-3);
   background:transparent;color:#0b0f0c;display:flex;align-items:center;justify-content:center;cursor:pointer;
   transition:background .15s,border-color .15s,transform .1s;}
 .sb-check:hover{border-color:var(--lime);}
@@ -5063,8 +5088,8 @@ body{padding-bottom:0 !important;}
 .sb-det{width:100%;display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows .2s ease,opacity .2s ease;}
 .sb-row.aberta .sb-det{grid-template-rows:1fr;opacity:1;}
 .sb-det>div{overflow:hidden;min-height:0;}
-.sb-det-in{padding:7px 2px 3px;display:flex;flex-direction:column;gap:3px;text-align:center;}
-.sb-nome{font-size:11.5px;font-weight:700;line-height:1.3;overflow-wrap:anywhere;}
+.sb-det-in{padding:6px 1px 3px;display:flex;flex-direction:column;gap:3px;text-align:center;}
+.sb-nome{font-size:11px;font-weight:700;line-height:1.3;overflow-wrap:anywhere;}
 .sb-row.feita .sb-nome{color:var(--done-text);text-decoration:line-through;}
 .sb-etapa{font-size:10px;line-height:1.35;color:var(--text-2);overflow-wrap:anywhere;}
 .sb-etapa.warn{color:var(--warn);}
@@ -5084,7 +5109,7 @@ body{padding-bottom:0 !important;}
 // leva o visual do app para dentro da janelinha (cópia única, feita ao abrir)
 function prepararSidebar(win) {
   const d = win.document;
-  d.title = "LIFE";
+  d.title = DESKTOP ? "LIFE · sidebar" : "LIFE";
   document.querySelectorAll('link[rel="stylesheet"], style').forEach(n => d.head.appendChild(n.cloneNode(true)));
   const st = d.createElement("style");
   st.textContent = SIDEBAR_CSS;
@@ -5101,7 +5126,7 @@ const SB_CHECK = ce("svg", {
 }, ce("path", { d: "M5 12.5l4.5 4.5L19 7" }));
 
 function SidebarFlutuante({ win, projetos, rotinas, agenda, log, ordemDia, onCotar, onCotarAvulsa, onTick,
-  saldo, liberado, agora, toast, bloqueado, pullState, onPull }) {
+  saldo, liberado, agora, toast, bloqueado, pullState, onPull, desktop, onFechar }) {
   const hoje = todayISO();
   const fila = useMemo(
     () => ordenarFila(agendaDoDia(hoje, projetos, rotinas, agenda, log), (ordemDia || {})[hoje]),
@@ -5146,7 +5171,8 @@ function SidebarFlutuante({ win, projetos, rotinas, agenda, log, ordemDia, onCot
       : partes.filter(t => t.indexOf("🔁") !== 0 && t.indexOf("⚠️") !== 0).join(" · ")
         || (e.tipo === "projeto" && e.feita ? "etapa concluída" : "");
     const hora = e.hora || (e.tipo === "rotina" ? "rotina" : "—");
-    const valorTxt = (e.feita ? "feito" : atrasada ? "atrasado" : "") + (valor ? (e.feita || atrasada ? " · " : "") + valor.txt : "");
+    const valorTxt = (e.feita ? "feito" : atrasada ? "atrasado" : "") +
+      (valor ? (e.feita || atrasada ? " · " : "") + valor.txt.replace(" 💎", "\u00A0💎") : "");
     const valorCor = e.feita ? "var(--done-text)" : atrasada ? "var(--warn)" : valor ? valor.cor : "var(--text-3)";
     return ce("div", {
       key: e.key,
@@ -5172,8 +5198,12 @@ function SidebarFlutuante({ win, projetos, rotinas, agenda, log, ordemDia, onCot
             valorTxt && ce("span", { className: "sb-valor", style: { color: valorCor }, title: valor && valor.title || "" }, valorTxt)))));
   };
 
-  return ce("div", { className: "sb" },
-    ce("div", { className: "sb-head" },
+  return ce("div", { className: "sb" + (desktop ? " desk" : "") },
+    ce("div", { className: "sb-head", title: desktop ? "arraste por aqui" : "" },
+      desktop && ce("div", { className: "sb-alca" }, ce("span")),
+      desktop && ce("button", { className: "sb-fechar", title: "fechar a sidebar", "aria-label": "Fechar sidebar", onClick: onFechar },
+        ce("svg", { width: 11, height: 11, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.6, strokeLinecap: "round", "aria-hidden": true },
+          ce("path", { d: "M6 6l12 12M18 6L6 18" }))),
       ce("div", { className: "sb-saldo" + (saldo < 0 ? " neg" : ""), title: "saldo de 💎" }, ce("span", { className: "gem" }), saldo),
       total > 0 && ce("div", { className: "sb-bar" }, ce("div", { style: { width: pct + "%" } })),
       ce("div", { className: "sb-prog" + (total && feitas === total ? " ok" : "") },
