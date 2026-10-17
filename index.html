@@ -926,29 +926,71 @@ function resumoRepetir(item) {
   return "todo dia";
 }
 
+/* Vínculo do compromisso com o projeto.
+   Ligado e "avança a trilha" (padrão): marcar = uma passada na etapa vigente do projeto.
+   Ligado e "não avança": marcar conta só este compromisso, paga pelo esforço escolhido
+   e mantém o emoji/nome do projeto. Essa escolha mora no campo Esforço ("solo" ou
+   "solo:media"), que a aba Agenda do Sheets já guarda — não precisa mexer no Code.gs. */
+const SOLO = "solo";
+const ehSolo = item => String(item && item.esforco || "").split(":")[0] === SOLO;
+const avancaProjeto = item => !!(item && item.projId) && !ehSolo(item);
+const esforcoDoItem = item => ehSolo(item) ? (String(item.esforco).split(":")[1] || "") : String(item && item.esforco || "");
+// evento de compromisso que não é passada de projeto (avulso ou "não avança")
+const ehAvulsoLog = ev => !!ev.agendaId && !ev.projeto;
+
 // avulso: esforço fixo, sem multiplicador de falta; respeita a carteira máxima
 function cotarAvulsa(item, log, carteira, dia) {
-  const e = ESFORCOS.find(x => x.id === item.esforco);
+  const e = ESFORCOS.find(x => x.id === esforcoDoItem(item));
   if (!e) return { base: 0, mult: 1, nominal: 0, gemas: 0, motivo: "" };
   const restCarteira = Math.max(0, ECON.carteiraMax - saldoGemas(log, carteira));
   const gemas = Math.min(e.gemas, restCarteira);
   const motivo = gemas >= e.gemas ? "" : "carteira cheia";
   return { base: e.gemas, mult: 1, nominal: e.gemas, gemas, motivo };
 }
-// índice do evento do Log que marcou este avulso neste dia (-1 = não feito)
+/* índice do evento do Log que marcou ESTE compromisso neste dia (-1 = não feito).
+   Vale para avulsos e para os ligados a projeto: cada compromisso tem o próprio check. */
 function eventoAvulso(log, item, dia) {
   for (let k = (log || []).length - 1; k >= 0; k--) if (log[k].agendaId === item.id && log[k].data === dia) return k;
   return -1;
 }
 
+/* Até 17/10/2026 a passada de um compromisso ligado ia para o Log sem agendaId, e todos
+   os compromissos daquele projeto no dia apareciam marcados juntos. Aqui cada passada
+   antiga é entregue a UM compromisso do dia, na ordem do horário. Só olha datas até a
+   mudança e nunca mexe num evento que já tem dono, então é seguro rodar a cada abertura. */
+const AGENDA_LOG_ATE = "2026-10-17";
+function migrarLogAgenda(log, agenda, projetos) {
+  const nomeDe = {};
+  (projetos || []).forEach(p => { nomeDe[p.projId] = p.projeto; });
+  const ligadas = (agenda || []).filter(a => avancaProjeto(a) && nomeDe[a.projId]);
+  if (!ligadas.length) return log;
+  const usado = {};
+  (log || []).forEach(ev => { if (ev.agendaId) usado[ev.agendaId + "|" + ev.data] = true; });
+  const filas = {}; // "dia|projeto" -> compromissos ainda sem passada, por horário
+  let mudou = false;
+  const out = (log || []).map(ev => {
+    if (ev.agendaId || !ev.projeto || !ev.data || ev.data > AGENDA_LOG_ATE) return ev;
+    const chave = ev.data + "|" + ev.projeto;
+    if (!filas[chave]) filas[chave] = ligadas
+      .filter(a => nomeDe[a.projId] === ev.projeto && ocorreNoDia(a, ev.data) && !usado[a.id + "|" + ev.data])
+      .sort((a, b) => (a.hora || "~") < (b.hora || "~") ? -1 : (a.hora || "~") > (b.hora || "~") ? 1 : 0);
+    const a = filas[chave].shift();
+    if (!a) return ev;
+    mudou = true;
+    return { ...ev, agendaId: a.id };
+  });
+  return mudou ? out : log;
+}
+
 /* Tudo que acontece num dia, pronto para a linha do tempo:
    projetos recorrentes previstos, compromissos e rotinas.
-   Um compromisso ligado a um projeto substitui a linha recorrente dele naquele dia. */
+   Um compromisso que avança a trilha substitui a linha recorrente do projeto naquele dia.
+   Cada compromisso tem o próprio check (evento com o agendaId dele no Log). */
 function agendaDoDia(dia, projetos, rotinas, agenda, log) {
   const out = [];
   const itens = (agenda || []).filter(a => ocorreNoDia(a, dia));
   const ligados = {};
-  itens.forEach(a => { if (a.projId) ligados[a.projId] = true; });
+  itens.forEach(a => { if (avancaProjeto(a)) ligados[a.projId] = true; });
   const passado = dia < todayISO();
   (projetos || []).forEach(p => {
     if (!ehRecorrente(p) || !previstoNoDia(p, dia) || ligados[p.projId]) return;
@@ -962,8 +1004,10 @@ function agendaDoDia(dia, projetos, rotinas, agenda, log) {
   });
   itens.forEach(a => {
     const p = a.projId ? (projetos || []).find(x => x.projId === a.projId) : null;
-    if (p) out.push({ key: "a-" + a.id, tipo: "projeto", hora: a.hora || "", duracao: a.duracao || 0, p, item: a, feita: feitoNoDia(log, p.projeto, dia) > 0 });
-    else out.push({ key: "a-" + a.id, tipo: "avulso", hora: a.hora || "", duracao: a.duracao || 0, item: a, feita: eventoAvulso(log, a, dia) !== -1 });
+    const feita = eventoAvulso(log, a, dia) !== -1;
+    if (p && avancaProjeto(a)) out.push({ key: "a-" + a.id, tipo: "projeto", hora: a.hora || "", duracao: a.duracao || 0, p, item: a, feita });
+    // "não avança" (ou projeto apagado): check só deste compromisso; p fica para o emoji e o nome
+    else out.push({ key: "a-" + a.id, tipo: "avulso", hora: a.hora || "", duracao: a.duracao || 0, p: p || null, item: a, feita });
   });
   (rotinas || []).forEach(r => out.push({ key: "r-" + (r.projId || r.projeto), tipo: "rotina", hora: "", duracao: 0, p: r, feita: feitoNoDia(log, r.projeto, dia) > 0 }));
   return out.sort((a, b) => (a.hora ? 0 : 1) - (b.hora ? 0 : 1) || (a.hora < b.hora ? -1 : a.hora > b.hora ? 1 : 0));
@@ -1285,8 +1329,9 @@ function App() {
     if (raw) {
       try {
         const data = JSON.parse(raw);
-        const logSalvo = normalizarLog(data.log);
-        const migrados = migrarProjetos(data.projects || [], logSalvo);
+        const logLido = normalizarLog(data.log);
+        const migrados = migrarProjetos(data.projects || [], logLido);
+        const logSalvo = migrarLogAgenda(logLido, data.agenda || [], migrados);
         setProjects(arquivarConcluidas(resetRotinas(migrados), logSalvo));
         setLog(logSalvo);
         setOrdemCat(data.ordemCat || []);
@@ -1527,7 +1572,8 @@ function resetRotinas(list) {
   // +1 passada na etapa atual; fecha a etapa ao atingir a meta de repetições
   // +1 passada na etapa atual da TRILHA (etapas recorrentes ficam de fora)
   // +1 passada na etapa vigente. dataISO permite check-in retroativo.
-  function avancar(target, dataISO) {
+  // agendaId: a passada veio de um compromisso — fica marcada só nele.
+  function avancar(target, dataISO, agendaId) {
     const dia = dataISO || todayISO();
     if (dia > todayISO()) return;
     const etapas0 = target.etapas || [];
@@ -1556,7 +1602,8 @@ function resetRotinas(list) {
       etapa: alvo.texto,
       gemas: cot.gemas,
       mult: cot.mult,
-      bonus
+      bonus,
+      ...(agendaId ? { agendaId } : {})
     }]);
     avisarGemas(cot, bonus);
     if (fechou) setAviso({
@@ -1572,11 +1619,16 @@ function resetRotinas(list) {
 
   /* ---- CHECK-INS ---- */
   // desfaz o ultimo check-in do projeto naquele dia
+  // (prefere os que não vieram de compromisso: esses têm o check deles na agenda)
   function desfazerCheckin(target, dataISO) {
-    const rev = [...log].reverse().findIndex(ev =>
-      ev.projeto === target.projeto && String(ev.data).slice(0, 10) === dataISO);
+    const doDia = ev => ev.projeto === target.projeto && String(ev.data).slice(0, 10) === dataISO;
+    let rev = [...log].reverse().findIndex(ev => doDia(ev) && !ev.agendaId);
+    if (rev === -1) rev = [...log].reverse().findIndex(doDia);
     if (rev === -1) return;
-    const real = log.length - 1 - rev;
+    desfazerEvento(target, log.length - 1 - rev);
+  }
+  // tira do Log um evento de passada e devolve a passada à etapa dele
+  function desfazerEvento(target, real) {
     const etapaTexto = log[real].etapa;
     setLog(log.filter((_, k) => k !== real));
     setProjects(prev => prev.map(p => {
@@ -1840,23 +1892,35 @@ function resetRotinas(list) {
       : prev.filter(a => a.id !== item.id));
     setAgendando(null);
   }
-  function tickAvulso(item, dia) {
+  /* Check de um compromisso: só ele marca e desmarca, mesmo com outros do mesmo projeto no dia.
+     - avança a trilha: uma passada na etapa vigente, gravada com o agendaId dele
+     - avulso / não avança: evento próprio no Log, paga pelo esforço escolhido */
+  function tickCompromisso(e, dia) {
     if (dia > todayISO()) return;
+    const item = e.item;
     const k = eventoAvulso(log, item, dia);
     if (k !== -1) {
+      // se esse check foi uma passada, devolve a passada ao projeto dela
+      const ev = log[k];
+      const dono = ev.projeto ? projects.find(p => p.projeto === ev.projeto) : null;
+      if (dono) return desfazerEvento(dono, k);
       setLog(log.filter((_, j) => j !== k));
       return;
     }
+    if (e.tipo === "projeto") {
+      if (!etapaVigente(e.p)) return setEditing({ ref: e.p, ...e.p });
+      return avancar(e.p, dia, item.id);
+    }
     const cot = cotarAv(item, dia);
     setLog(prev => [...prev, {
-      data: dia, projeto: "", categoria: "Agenda", etapa: item.titulo,
+      data: dia, projeto: "", categoria: "Agenda", etapa: item.titulo || (e.p ? e.p.projeto : ""),
       gemas: cot.gemas, mult: 1, bonus: 0, agendaId: item.id
     }]);
-    if (item.esforco) avisarGemas(cot, 0);
+    if (esforcoDoItem(item)) avisarGemas(cot, 0);
   }
   // marcar/desmarcar uma linha da agenda do dia
   function tickEntrada(e, dia) {
-    if (e.tipo === "avulso") return tickAvulso(e.item, dia);
+    if (e.item) return tickCompromisso(e, dia);
     if (e.tipo === "rotina") return checkinRotina(e.p, dia);
     if (e.feita) return desfazerCheckin(e.p, dia);
     if (!etapaVigente(e.p)) return setEditing({ ref: e.p, ...e.p });
@@ -1930,8 +1994,9 @@ function resetRotinas(list) {
         action: "getTudo"
       });
       if (!r.ok) throw new Error(r.error || "erro ao puxar");
-      const logNuvem = normalizarLog(r.log || []);
-      const migrados2 = migrarProjetos(rowsToProjects(r.rows || []), logNuvem);
+      const logLido = normalizarLog(r.log || []);
+      const migrados2 = migrarProjetos(rowsToProjects(r.rows || []), logLido);
+      const logNuvem = migrarLogAgenda(logLido, r.agenda || [], migrados2);
       setProjects(arquivarConcluidas(resetRotinas(migrados2), logNuvem));
       setLog(logNuvem);
       setCarteira(r.carteira || []);
@@ -2014,7 +2079,7 @@ function resetRotinas(list) {
     onNovo: dia => setAgendando({ data: dia })
   }) : view === "progresso" ? /*#__PURE__*/React.createElement(ProgressoView, {
     projetos: projetos,
-    log: log.filter(ev => !ev.agendaId) // avulsos não contam como passadas
+    log: log.filter(ev => !ehAvulsoLog(ev)) // avulsos não contam como passadas
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, favoritos.length > 0 && /*#__PURE__*/React.createElement(FocusBand, {
     favoritos: favoritos,
     onCotar: cotar
@@ -3004,12 +3069,17 @@ function infoLinha(e, dia, log, onCotar, onCotarAvulsa) {
   const hoje = todayISO(), futuro = dia > hoje;
   const p = e.p, it = e.item;
   const et = e.tipo === "projeto" ? etapaVigente(p) : null;
-  const emoji = e.tipo === "avulso" ? "📅" : (p.emoji || (e.tipo === "rotina" ? "🌱" : "📌"));
+  const emoji = e.tipo === "avulso" ? (p ? p.emoji || "📌" : "📅") : (p.emoji || (e.tipo === "rotina" ? "🌱" : "📌"));
   const titulo = (it && it.titulo) || (p ? p.projeto : "");
   const partes = [];
   if (e.tipo === "projeto") {
     if (it && it.titulo && it.titulo !== p.projeto) partes.push(p.projeto);
     partes.push(et ? et.texto : "⚠️ sem próxima etapa — toque para definir");
+  }
+  // compromisso de projeto que não avança a trilha
+  if (e.tipo === "avulso" && p) {
+    if (it.titulo && it.titulo !== p.projeto) partes.push(p.projeto);
+    partes.push("sem passada");
   }
   if (e.tipo === "rotina") partes.push("rotina");
   const rep = it ? resumoRepetir(it) : e.tipo === "projeto" ? resumoRec(p) : "";
@@ -3019,16 +3089,17 @@ function infoLinha(e, dia, log, onCotar, onCotarAvulsa) {
   if (e.feita) {
     // 💎 que a linha já rendeu neste dia
     let g = 0;
-    if (e.tipo === "avulso") {
+    if (it) {
+      // compromisso: só o que o check dele rendeu
       const k = eventoAvulso(log, it, dia);
-      g = k === -1 ? 0 : (log[k].gemas || 0);
+      g = k === -1 ? 0 : (log[k].gemas || 0) + (log[k].bonus || 0);
     } else {
       g = (log || []).filter(ev => ev.projeto === p.projeto && ev.data === dia && !ev.agendaId)
         .reduce((s, ev) => s + (ev.gemas || 0) + (ev.bonus || 0), 0);
     }
     if (g > 0) valor = { txt: "+" + g + " 💎", cor: "var(--done-text)" };
   } else if (!futuro) {
-    const cot = e.tipo === "avulso" ? (it.esforco ? onCotarAvulsa(it, dia) : null)
+    const cot = e.tipo === "avulso" ? (esforcoDoItem(it) ? onCotarAvulsa(it, dia) : null)
       : (e.tipo === "rotina" || et) ? onCotar(p, dia) : null;
     if (cot) valor = {
       txt: "+" + cot.gemas + " 💎", title: cot.motivo,
@@ -3465,7 +3536,8 @@ function AgendarModal({ inicial, projetos, onCotar, onSalvar, onExcluir, onClose
     projId: "", esforco: "", repetir: "", dias: [], excecoes: []
   };
   const [texto, setTexto] = useState(editando ? base.titulo : "");
-  const [f, setF] = useState(base);
+  // no formulário o vínculo vira um booleano e o esforço fica limpo ("solo:media" -> media)
+  const [f, setF] = useState(() => ({ ...base, avanca: !ehSolo(base), esforco: esforcoDoItem(base) }));
   // campos ajustados à mão não são mais sobrescritos pelo texto
   const [mexido, setMexido] = useState(editando ? { data: 1, hora: 1, duracao: 1, projId: 1, repetir: 1 } : {});
   const muda = patch => {
@@ -3495,14 +3567,19 @@ function AgendarModal({ inicial, projetos, onCotar, onSalvar, onExcluir, onClose
   const pode = !!((f.titulo || "").trim() || p);
   const salvar = () => {
     if (!pode) return;
+    const { avanca, ...resto } = f;
     onSalvar({
-      ...f,
+      ...resto,
       titulo: (f.titulo || "").trim(),
       duracao: Number(f.duracao) || 0,
-      esforco: p ? "" : f.esforco,
+      esforco: !p ? f.esforco : avanca ? "" : SOLO + (f.esforco ? ":" + f.esforco : ""),
       dias: f.repetir === "semanal" ? (f.dias || []) : []
     });
   };
+  // desligar o vínculo já sugere o esforço do próprio projeto como recompensa
+  const alternarVinculo = () => muda(f.avanca
+    ? { avanca: false, esforco: f.esforco || (p && p.esforco) || "media" }
+    : { avanca: true });
   const dataBR = iso => iso.slice(8, 10) + "/" + iso.slice(5, 7);
   const labelData = f.data === hoje ? "hoje" : f.data === somaDias(hoje, 1) ? "amanhã"
     : diaLocal(f.data).toLocaleDateString("pt-BR", { weekday: "short", day: "numeric", month: "short" }).replace(/\./g, "");
@@ -3545,7 +3622,8 @@ function AgendarModal({ inicial, projetos, onCotar, onSalvar, onExcluir, onClose
         /*#__PURE__*/React.createElement("b", { style: { color: "var(--text)" } },
           (p ? (p.emoji || "📌") + " " : "📅 ") + ((f.titulo || "").trim() || (p ? p.projeto : "sem título"))),
         " · " + labelData + (f.hora ? " às " + f.hora : "") + (f.duracao ? " · " + fmtDur(Number(f.duracao)) : "")
-          + (f.repetir ? " · 🔁 " + resumoRepetir(f) : "")),
+          + (f.repetir ? " · 🔁 " + resumoRepetir(f) : "")
+          + (p && !f.avanca ? " · sem passada" : "")),
 
       campo("Quando", [
         chip(f.data === hoje, "Hoje", () => muda({ data: hoje }), "hoje"),
@@ -3577,7 +3655,31 @@ function AgendarModal({ inicial, projetos, onCotar, onSalvar, onExcluir, onClose
           (projetos || []).map(x => /*#__PURE__*/React.createElement("option", { key: x.projId, value: x.projId }, (x.emoji || "📌") + " " + x.projeto)))
       ]),
 
-      p
+      // chave do vínculo: este compromisso avança (ou não) a trilha do projeto
+      p && /*#__PURE__*/React.createElement("div", {
+        className: "row",
+        onClick: alternarVinculo,
+        style: {
+          gap: 12, marginTop: 10, padding: "10px 12px", borderRadius: 10, cursor: "pointer",
+          background: "var(--bg-elev2)", border: "1px solid " + (f.avanca ? "var(--lime-dim)" : "var(--border-strong)")
+        }
+      },
+        /*#__PURE__*/React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+          /*#__PURE__*/React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: "var(--text)" } }, "🔗 Avança a trilha do projeto"),
+          /*#__PURE__*/React.createElement("div", { style: { fontSize: 11, color: "var(--text-3)", marginTop: 2, lineHeight: 1.45 } },
+            f.avanca
+              ? "ligado: marcar dá uma passada na etapa vigente de " + p.projeto
+              : "desligado: marcar conta só este compromisso, a trilha não mexe")),
+        /*#__PURE__*/React.createElement("button", {
+          type: "button",
+          className: "loja-switch" + (f.avanca ? " on" : ""),
+          role: "switch",
+          "aria-checked": f.avanca ? "true" : "false",
+          "aria-label": "Avança a trilha do projeto",
+          onClick: ev => { ev.stopPropagation(); alternarVinculo(); }
+        }, /*#__PURE__*/React.createElement("span", null))),
+
+      p && f.avanca
         ? /*#__PURE__*/React.createElement("div", {
             style: { marginTop: 10, padding: "9px 12px", borderRadius: 10, background: "var(--lime-soft)", fontSize: 12, color: "var(--lime)", lineHeight: 1.5 }
           }, etapaVigente(p)
@@ -4346,7 +4448,9 @@ function CalendarioView({ projetos, rotinas, agenda, log, onTick, onAbrir, onCot
 
   const entradas = agendaDoDia(diaSel, projetos, rotinas, agenda, log);
   const naLista = {};
-  entradas.forEach(e => { if (e.p) naLista[e.p.projeto] = true; });
+  // só linhas que mostram TODAS as passadas do projeto no dia (recorrente e rotina);
+  // compromisso mostra só o check dele, então passadas soltas do projeto aparecem embaixo
+  entradas.forEach(e => { if (e.p && !e.item) naLista[e.p.projeto] = true; });
   // passadas de projetos sem recorrência não estão na agenda, mas foram feitas
   const extras = (log || []).filter(ev => ev.data === diaSel && !ev.agendaId && !naLista[ev.projeto]);
   const labelDia = (() => {
