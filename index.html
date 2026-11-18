@@ -654,7 +654,6 @@ const ESFORCOS = [
   { id: "pesada", nome: "Pesada", gemas: 35, dica: "60+ min" }
 ];
 const ECON = {
-  carteiraMax: 520,      // acima disso não acumula (não há teto de ganho por dia)
   passadasPagasDia: 2,   // por projeto; as seguintes contam progresso, mas pagam 0
   multTeto: 2,
   multPorFalta: 0.25,    // dia previsto (diária, dias fixos, dia do mês) que ficou sem check-in
@@ -749,17 +748,14 @@ const saldoGemas = (log, carteira) =>
   (log || []).reduce((s, ev) => s + (ev.gemas || 0) + (ev.bonus || 0), 0)
   - (carteira || []).reduce((s, c) => s + (c.gemas || 0), 0);
 
-// quanto uma passada em `dia` paga — multiplicador + todos os tetos
+// quanto uma passada em `dia` paga — multiplicador + limite de passadas pagas no dia
 function cotarPassada(p, log, carteira, dia, pausas) {
   const base = esforcoDe(p).gemas;
   const mult = multFalta(p, log, dia, pausas);
   const nominal = Math.round(base * mult);
   if (feitoNoDia(log, p.projeto, dia) >= ECON.passadasPagasDia)
     return { base, mult, nominal, gemas: 0, motivo: ECON.passadasPagasDia + " passadas pagas hoje" };
-  const restCarteira = Math.max(0, ECON.carteiraMax - saldoGemas(log, carteira));
-  const gemas = Math.min(nominal, restCarteira);
-  const motivo = gemas >= nominal ? "" : "carteira cheia";
-  return { base, mult, nominal, gemas, motivo };
+  return { base, mult, nominal, gemas: nominal, motivo: "" };
 }
 
 /* Carteira: { id, criadoEm, tipo: "jogo"|"emergencia"|"pausa"|"loja"|"cofre"|"saque", minutos, gemas, inicio, fim, itemId, nome, cofre }
@@ -789,7 +785,7 @@ const emergenciaNaSemana = (carteira, hoje) => (carteira || []).some(c =>
    Cada troca fica na Carteira, então o saldo continua sempre derivado:
    - "loja":  troca de item (gemas = saiu do saldo, cofre = saiu do cofre do item)
    - "jogo":  item com minutos > 0 libera os jogos no PC, igual às compras antigas
-   - "cofre": 💎 guardadas para um item caro (saem do saldo, então não travam no teto)
+   - "cofre": 💎 guardadas para um item caro (saem do saldo)
    - "saque": tirar do cofre devolve só 80% (gemas negativo = voltou para o saldo) */
 const PERIODOS = [
   { id: "", nome: "sem limite" },
@@ -877,8 +873,7 @@ function statusItem(item, carteira, saldo, hoje) {
     usos, esgotado, cofre, doCofre,
     doSaldo: item.preco - doCofre,
     pode: !esgotado && disponivel >= item.preco,
-    falta: Math.max(0, item.preco - disponivel),
-    soCofre: item.preco > ECON.carteiraMax // não cabe na carteira: só sai pelo cofre
+    falta: Math.max(0, item.preco - disponivel)
   };
 }
 // legenda curta embaixo do nome do item
@@ -886,7 +881,6 @@ function legendaItem(item, st) {
   if (st.esgotado) return "esgotado · " + quandoVolta(item.periodo);
   if (st.cofre > 0) return "no cofre: " + st.cofre + " de " + item.preco;
   if (item.limite && item.periodo) return textoLimite(item, st.usos);
-  if (st.soCofre) return "junte no cofre";
   return item.descricao || (item.minutos ? "libera os jogos no PC" : "");
 }
 
@@ -938,14 +932,11 @@ const esforcoDoItem = item => ehSolo(item) ? (String(item.esforco).split(":")[1]
 // evento de compromisso que não é passada de projeto (avulso ou "não avança")
 const ehAvulsoLog = ev => !!ev.agendaId && !ev.projeto;
 
-// avulso: esforço fixo, sem multiplicador de falta; respeita a carteira máxima
+// avulso: esforço fixo, sem multiplicador de falta
 function cotarAvulsa(item, log, carteira, dia) {
   const e = ESFORCOS.find(x => x.id === esforcoDoItem(item));
   if (!e) return { base: 0, mult: 1, nominal: 0, gemas: 0, motivo: "" };
-  const restCarteira = Math.max(0, ECON.carteiraMax - saldoGemas(log, carteira));
-  const gemas = Math.min(e.gemas, restCarteira);
-  const motivo = gemas >= e.gemas ? "" : "carteira cheia";
-  return { base: e.gemas, mult: 1, nominal: e.gemas, gemas, motivo };
+  return { base: e.gemas, mult: 1, nominal: e.gemas, gemas: e.gemas, motivo: "" };
 }
 /* índice do evento do Log que marcou ESTE compromisso neste dia (-1 = não feito).
    Vale para avulsos e para os ligados a projeto: cada compromisso tem o próprio check. */
@@ -1592,9 +1583,8 @@ function resetRotinas(list) {
       return { ...p, etapas, ultimoAvanco: dia > ant ? dia : ant };
     }));
     const cot = cotar(target, dia);
-    // bônus de etapa: 1x a base, respeitando a carteira máxima
-    const bonus = fechou && meta >= ECON.bonusMinPassadas ? Math.max(0, Math.min(esforcoDe(target).gemas,
-      ECON.carteiraMax - (saldo + cot.gemas))) : 0;
+    // bônus de etapa: 1x a base
+    const bonus = fechou && meta >= ECON.bonusMinPassadas ? esforcoDe(target).gemas : 0;
     setLog(prev => [...prev, {
       data: dia,
       projeto: target.projeto,
@@ -4012,7 +4002,7 @@ function LojaVitrine({ loja, carteira, saldo, onAbrir, onGerenciar, onRestaurar 
   // destaque: o item mais caro que já dá para trocar; se nenhum, o mais perto de dar
   const candidatos = ativos.filter(x => !x.minutos && !st[x.id].esgotado);
   const podem = candidatos.filter(x => st[x.id].pode).sort((a, b) => b.preco - a.preco);
-  const perto = candidatos.filter(x => !st[x.id].soCofre).sort((a, b) => st[a.id].falta - st[b.id].falta);
+  const perto = candidatos.slice().sort((a, b) => st[a.id].falta - st[b.id].falta);
   const destaque = podem[0] || perto[0] || null;
   const cats = categoriasDaLoja(ativos);
 
@@ -4089,7 +4079,7 @@ function ItemRow({ item, st, onAbrir, ultimo }) {
 function ItemSheet({ item, carteira, saldo, liberado, onTrocar, onDepositar, onSacar, onClose }) {
   const st = statusItem(item, carteira, saldo, todayISO());
   const restante = Math.max(0, item.preco - st.cofre);
-  const usaCofre = !item.minutos && (st.cofre > 0 || item.preco > Math.max(0, saldo) || st.soCofre);
+  const usaCofre = !item.minutos && (st.cofre > 0 || item.preco > Math.max(0, saldo));
   const pct = item.preco ? Math.min(100, Math.round(st.cofre / item.preco * 100)) : 0;
   const volta = Math.floor(st.cofre * (1 - ECON.taxaSaque));
 
@@ -4145,9 +4135,7 @@ function ItemSheet({ item, carteira, saldo, liberado, onTrocar, onDepositar, onS
         ce("div", { style: { height: 6, borderRadius: 3, background: "var(--bg-elev2)", overflow: "hidden" } },
           ce("div", { style: { width: pct + "%", height: "100%", background: "var(--lime)" } })),
         ce("div", { style: { fontSize: 11.5, color: "var(--text-3)", margin: "8px 0 10px", lineHeight: 1.5 } },
-          st.soCofre
-            ? "Custa mais que o teto da carteira (" + ECON.carteiraMax + "): junte aqui aos poucos. O que está no cofre não conta no teto."
-            : "Guarde aos poucos: o que está no cofre sai do saldo e não conta no teto da carteira."),
+          "Guarde aos poucos: o que está no cofre sai do saldo e fica reservado para este item."),
         restante > 0 && (opcoes.length
           ? ce("div", { className: "row", style: { gap: 6, flexWrap: "wrap" } },
               opcoes.map(o => ce("button", { key: o.txt, className: "btn btn-sm", onClick: () => onDepositar(o.v) }, "🏦 " + o.txt)))
@@ -4200,10 +4188,7 @@ function CarteiraConteudo({ log, carteira, saldo, liberado, agora, loja, onEmerg
             ce("span", { className: "gem", style: { width: 20, height: 20 } }),
             ce("span", { style: { fontSize: 44, fontWeight: 800, letterSpacing: "-.03em", lineHeight: 1, color: saldo < 0 ? "var(--danger)" : "var(--text)" } }, saldo))),
         ce("div", { style: { textAlign: "right" } },
-          ce("div", { style: { fontSize: 14, fontWeight: 700, color: "var(--lime)" } }, "+" + ganhoHoje + " hoje"),
-          ce("div", { style: { fontSize: 11.5, color: "var(--text-3)", marginTop: 2 } }, "teto " + ECON.carteiraMax))),
-      ce("div", { style: { height: 6, borderRadius: 3, background: "var(--bg-elev2)", overflow: "hidden", marginTop: 12 } },
-        ce("div", { style: { width: Math.min(100, Math.max(0, saldo) / ECON.carteiraMax * 100) + "%", height: "100%", background: "var(--lime)" } })),
+          ce("div", { style: { fontSize: 14, fontWeight: 700, color: "var(--lime)" } }, "+" + ganhoHoje + " hoje"))),
       saldo < 0 && ce("div", { style: { fontSize: 11.5, color: "var(--danger)", marginTop: 8 } }, "dívida de emergência — os próximos ganhos pagam primeiro")),
 
     ce("div", {
@@ -4375,7 +4360,7 @@ function ItemEditor({ inicial, categorias, cofre, onSalvar, onExcluir, onClose }
           }, categorias.map(c => ce("option", { key: c, value: c }, c)), ce("option", { value: "__nova__" }, "➕ Nova categoria…"))),
 
       campo("Preço em 💎", ce("input", { type: "number", min: "0", value: f.preco, onChange: e => muda({ preco: e.target.value }), "aria-label": "Preço" }),
-        "≈ " + passadas + " passadas médias (20 💎 cada)" + (preco > ECON.carteiraMax ? " · acima do teto de " + ECON.carteiraMax + ": só sai pelo cofre" : "")),
+        "≈ " + passadas + " passadas médias (20 💎 cada)"),
 
       campo("Limite", ce("div", { className: "row", style: { gap: 8 } },
         ce("select", { value: f.periodo || "", "aria-label": "Período do limite", onChange: e => muda({ periodo: e.target.value, limite: e.target.value ? (parseInt(f.limite) || 1) : 0 }) },
